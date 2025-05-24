@@ -4,3 +4,9 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
+
+ffmpeg-next ={ version = "7.1.0",features = ["default","software-resampling"]}
+
+ndarray = "0.15.6"
+env_logger = "0.11.8"
+vad-rs = { version = "0.1.5" ,features = ["default","directml"]}
