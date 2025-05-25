@@ -168,7 +168,5 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
     pb.finish();
     multi.remove(&pb);
-
-
     Ok(())
 }
