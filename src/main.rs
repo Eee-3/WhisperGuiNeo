@@ -8,11 +8,22 @@ use std::path::Path;
 use ffmpeg_next as ffmpeg;
 use ffmpeg_next::format::Sample;
 use ffmpeg_next::format::sample::Type::{ Planar};
+use indicatif::{MultiProgress, ProgressBar};
+use indicatif_log_bridge::LogWrapper;
 use vad_rs::{Vad, VadStatus};
 use log::*;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    env_logger::init_from_env(env_logger::Env::new().default_filter_or("debug"));
+    let logger =
+        env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("debug"))
+            .build();
+    let level = logger.filter();
+    let multi = MultiProgress::new();
+
+    LogWrapper::new(multi.clone(), logger)
+        .try_init()
+        .unwrap();
+    log::set_max_level(level);
     let input_path = Path::new("samples/ep0音轨.wav");
     // if input_path.extension().unwrap() == "wav" {
     //     warn!("There's an unknown issue that prevent wav file from resampling.\n\
@@ -62,9 +73,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .unwrap();
 
     let mut output_samples: Vec<f32> = Vec::new();
+    let packets: Vec<_> = ictx.packets().collect();
+    let pb = multi.add(ProgressBar::new(packets.len() as u64));
 
     // 读取并处理每一帧
-    for (stream, packet) in ictx.packets() {
+    for (stream, packet) in packets {
+        pb.inc(1);
         if stream.index() != audio_stream_index {
             continue;
         }
@@ -82,7 +96,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             //     decoded.channels(),
             //     decoded.channel_layout()
             // );
-            // 
+            //
             // 重采样
             // let mut ctx = decoded.resampler(Sample::I16(Planar), ChannelLayout::MONO, target_sample_rate).unwrap();
             // 确保重采样器配置与数据访问一致
@@ -99,11 +113,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
             // }
         }
+
     }
+    pb.finish();
+    multi.remove(&pb);
 
 
     // 输出结果
-    println!("Output samples count: {}", output_samples.len());
+    debug!("Output samples count: {}", output_samples.len());
     // println!("Output samples bytes: {:?}", output_samples);
     // Load the model
     let model_path = "models/silero_vad.onnx";
@@ -119,8 +136,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Add 1s of silence to the end of the samples
     output_samples.extend(vec![0.0; sample_rate as usize]);
+    let chunks:Vec<_>=output_samples.chunks(chunk_size).enumerate().collect();
+    let pb = multi.add(ProgressBar::new(chunks.len() as u64));
 
-    for (i, chunk) in output_samples.chunks(chunk_size).enumerate() {
+    for (i, chunk) in chunks {
+        pb.inc(1);
         let time = i as f32 * chunk_size as f32 / sample_rate;
 
         match vad.compute(chunk){
@@ -134,7 +154,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     }
                     VadStatus::Silence => {
                         if is_speech {
-                            println!("Speech detected from {:.2}s to {:.2}s", start_time, time);
+                            debug!("Speech detected from {:.2}s to {:.2}s", start_time, time);
                             is_speech = false;
                         }
                     }
@@ -142,10 +162,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
             }
             Err(e) => {
-                println!("E:{:?}", e);
+                error!("E:{:?}", e);
             }
         }
     }
+    pb.finish();
+    multi.remove(&pb);
 
 
     Ok(())
