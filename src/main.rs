@@ -13,7 +13,7 @@ use log::*;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     env_logger::init_from_env(env_logger::Env::new().default_filter_or("debug"));
-    let input_path = Path::new("1.wav");
+    let input_path = Path::new("samples/ep0音轨.wav");
     // if input_path.extension().unwrap() == "wav" {
     //     warn!("There's an unknown issue that prevent wav file from resampling.\n\
     //            Please convert this audio to any other format to continue");
@@ -106,7 +106,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("Output samples count: {}", output_samples.len());
     // println!("Output samples bytes: {:?}", output_samples);
     // Load the model
-    let model_path = "silero_vad.onnx";
+    let model_path = "models/silero_vad.onnx";
 
     // Create a VAD iterator
     let mut vad = Vad::new(model_path, target_sample_rate.try_into().unwrap())?;
