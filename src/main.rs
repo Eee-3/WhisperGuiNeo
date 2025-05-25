@@ -13,12 +13,12 @@ use log::*;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     env_logger::init_from_env(env_logger::Env::new().default_filter_or("debug"));
-    let input_path = Path::new("test.wav");
-    if input_path.extension().unwrap() == "wav" {
-        warn!("There's an unknown issue that prevent wav file from resampling.\n\
-               Please convert this audio to any other format to continue");
-        // return Err(Box::from("File extgension not supported"));
-    }
+    let input_path = Path::new("1.wav");
+    // if input_path.extension().unwrap() == "wav" {
+    //     warn!("There's an unknown issue that prevent wav file from resampling.\n\
+    //            Please convert this audio to any other format to continue");
+    //     // return Err(Box::from("File extgension not supported"));
+    // }
 
     // 打开输入文件
     let mut ictx = input(input_path).unwrap();
@@ -37,8 +37,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let original_sample_rate = decoder.rate();
     let original_format=decoder.format();
     let original_channels = decoder.channels();
+    //fill in default Channel layout if it's empty
+    if decoder.channel_layout().is_empty(){
+        decoder.set_channel_layout(ChannelLayout::default(original_channels as i32));
+    }
     let original_channel_layout=decoder.channel_layout();
-    let original_channel_layout=ChannelLayout::STEREO;
     info!("original_format: {:?}", original_format);
     info!("original_channel_layout: {:?}", original_channel_layout);
     info!("channels: {}", original_channels);
@@ -71,6 +74,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
         let mut decoded:Audio= Audio::empty();
         while decoder.receive_frame(&mut decoded).is_ok() {
+
+            // println!(
+            //     "Frame: format={:?}, rate={}, channels={}, layout={:?}",
+            //     decoded.format(),
+            //     decoded.rate(),
+            //     decoded.channels(),
+            //     decoded.channel_layout()
+            // );
+            // 
             // 重采样
             // let mut ctx = decoded.resampler(Sample::I16(Planar), ChannelLayout::MONO, target_sample_rate).unwrap();
             // 确保重采样器配置与数据访问一致
