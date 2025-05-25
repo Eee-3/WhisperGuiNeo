@@ -1181,6 +1181,7 @@ version = "0.1.0"
 dependencies = [
  "env_logger",
  "ffmpeg-next",
+ "log",
  "ndarray 0.15.6",
  "vad-rs",
 ]

@@ -9,9 +9,16 @@ use ffmpeg_next as ffmpeg;
 use ffmpeg_next::format::Sample;
 use ffmpeg_next::format::sample::Type::{ Planar};
 use vad_rs::{Vad, VadStatus};
+use log::*;
+
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    // env_logger::init_from_env(env_logger::Env::new().default_filter_or("debug"));
-    let input_path = Path::new("test.wav");
+    env_logger::init_from_env(env_logger::Env::new().default_filter_or("debug"));
+    let input_path = Path::new("ep0音轨.wav");
+    if input_path.extension().unwrap() == "wav" {
+        warn!("There's an unknown issue that prevent wav file from resampling.\n\
+               Please convert this audio to any other format to continue");
+        // return Err(Box::from("File extgension not supported"));
+    }
 
     // 打开输入文件
     let mut ictx = input(input_path).unwrap();
@@ -29,16 +36,21 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // 获取原始音频信息
     let original_sample_rate = decoder.rate();
     let original_format=decoder.format();
-    let channels = decoder.channels();
-    println!("original_sample_rate: {}", original_sample_rate);
-    println!("channels: {}", channels);
-    println!("original_format: {:?}", original_format);
+    let original_channels = decoder.channels();
+    let original_channel_layout=decoder.channel_layout();
+    info!("original_format: {:?}", original_format);
+    info!("original_channel_layout: {:?}", original_channel_layout);
+    info!("channels: {}", original_channels);
+    info!("original_sample_rate: {}", original_sample_rate);
+    
+    
+    
 
     // 创建重采样器
     let mut resampler = software::resampling::Context::get(
-        decoder.format(),
+       original_format,
         decoder.channel_layout(),
-        decoder.rate(),
+        original_sample_rate,
         Sample::I16(Planar),
         ChannelLayout::MONO,
         target_sample_rate,
