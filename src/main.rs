@@ -8,6 +8,7 @@ use indicatif::{MultiProgress, ProgressBar};
 use indicatif_log_bridge::LogWrapper;
 use log::*;
 use std::path::Path;
+use ffmpeg_next::ffi::int_fast8_t;
 use vad_rs::{Vad, VadStatus};
 use whisper_rs::{
     DtwModelPreset, FullParams, SamplingStrategy, WhisperContext, WhisperContextParameters,
@@ -141,7 +142,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut is_speech = false;
     let mut start_time = 0.0;
     let mut full_audio_chunk: Vec<f32> = Vec::new();
-    let mut silence_min_samples=8000;
+    let silence_min_samples=5;
+    let mut silence_samples=0;
     let sample_rate = target_sample_rate as f32;
     let chunk_size = (0.1 * sample_rate) as usize;
 
@@ -156,9 +158,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
         match vad.compute(chunk) {
             Ok(mut result) => {
-                match result.status() {
+                let status=if result.prob > 0.40 {
+                    VadStatus::Speech
+                } else {
+                    VadStatus::Silence
+                };
+                match status {
                     VadStatus::Speech => {
-                        silence_min_samples = 8000;
+                        silence_samples = 0;
                         full_audio_chunk.extend_from_slice(chunk);
                         if !is_speech {
                             start_time = time;
@@ -168,18 +175,27 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     VadStatus::Silence => {
                         if is_speech {
                             // debug!("Speech detected from {:.2}s to {:.2}s", start_time, time);
-                            if silence_min_samples > 0 {
-                                silence_min_samples-= chunk_size;
+                            if silence_samples < silence_min_samples {
+                                silence_samples+= chunk_size;
                                 full_audio_chunk.extend_from_slice(chunk);
                                 continue;
                             }
-                            active_speeches.push(ActiveSpeech::new(
-                                start_time,
-                                time,
-                                full_audio_chunk.clone(),
-                            ));
+                            let len=full_audio_chunk.len();
+                            let duration =len as f32 / sample_rate;
+                            if duration> 100000000.0 {
+                                for (idx,slices) in  full_audio_chunk.chunks(16000*5).enumerate() {
+                                    let new_start_time = start_time + (idx as f32) *5.0;
+                                    active_speeches.push(ActiveSpeech::new(new_start_time, new_start_time + (slices.len() as f32)/sample_rate, slices.to_vec()));
+                                }
+                            } else {
+                                active_speeches.push(ActiveSpeech::new(
+                                    start_time,
+                                    time,
+                                    full_audio_chunk.clone(),
+                                ));
+                            }
                             is_speech = false;
-                            silence_min_samples = 8000;
+                            silence_samples = 0;
                             full_audio_chunk.clear();
                         }
                     }
@@ -208,8 +224,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     multi.remove(&pb);
     for speech in active_speeches.as_slice() {
         debug!(
-            "Speech detected from {:.2}s to {:.2}s",
-            speech.start_time, speech.end_time
+            " {:.2}s Speech detected from {:.2}s to {:.2}s",
+            speech.end_time-speech.start_time,speech.start_time, speech.end_time
         );
         let spec = hound::WavSpec {
             channels: 1,
@@ -230,13 +246,20 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
         writer.finalize().unwrap();
     }
-    for speech in active_speeches.as_mut_slice() {
+    struct ActiveSpeechProcessInfo {
+        idx: usize,
+        new_items:Vec<ActiveSpeech>,
+    }
+    let mut speeches_to_process:Vec<ActiveSpeechProcessInfo>=Vec::new();
+    for (idx,speech) in active_speeches.iter_mut().enumerate() {
         let len=speech.data.len();
-        if len< 15900 {
+        let time =len as f32 / sample_rate;
+        if time< 1.01 {
             let padding_length = 16000 - len + 100;
             let padding = vec![0.0; padding_length]; // 动态创建一个 Vec
             speech.data.extend_from_slice(&padding); // 使用 extend_from_slice 扩展数据
         }
+        
     }
     do_whisper(&active_speeches, &multi);
 
@@ -248,11 +271,11 @@ fn do_whisper(active_speech_list: &[ActiveSpeech], multi: &MultiProgress) {
     let mut context_param = WhisperContextParameters::default();
 
     // Enable DTW token level timestamp for known model by using model preset
-    // context_param.dtw_parameters.mode = whisper_rs::DtwMode::ModelPreset {
-    //     model_preset: whisper_rs::DtwModelPreset::Base,
-    // };
+    context_param.dtw_parameters.mode = whisper_rs::DtwMode::ModelPreset {
+        model_preset: whisper_rs::DtwModelPreset::LargeV3Turbo,
+    };
 
-    let ctx = WhisperContext::new_with_params("ggml-medium.bin", context_param)
+    let ctx = WhisperContext::new_with_params("ggml-large-v3-turbo.bin", context_param)
         .expect("failed to load model");
     // Create a state
     let mut state = ctx.create_state().expect("failed to create key");
@@ -263,7 +286,7 @@ fn do_whisper(active_speech_list: &[ActiveSpeech], multi: &MultiProgress) {
 
     // Edit params as needed.
     // Set the number of threads to use to 1.
-    params.set_n_threads(20);
+    params.set_n_threads(8);
     // Enable translation.
     params.set_translate(false);
     // Set the language to translate to English.
@@ -273,6 +296,7 @@ fn do_whisper(active_speech_list: &[ActiveSpeech], multi: &MultiProgress) {
     params.set_print_progress(false);
     params.set_print_realtime(false);
     params.set_print_timestamps(false);
+    // params.set_no_context(true);
     let prompt = "请输出简体中文";
     params.set_initial_prompt(prompt);
     
@@ -282,9 +306,9 @@ fn do_whisper(active_speech_list: &[ActiveSpeech], multi: &MultiProgress) {
     
     
     // Enable token level timestamps
-    // params.set_token_timestamps(true);
+    params.set_token_timestamps(true);
     let pb = multi.add(ProgressBar::new(active_speech_list.len() as u64));
-    // Open the audio file.
+    let st = std::time::Instant::now();
     for active_speech in active_speech_list.iter() {
         let s = active_speech.data.to_vec();
         // s.extend(vec![0.0; 16000usize]);
@@ -329,6 +353,8 @@ fn do_whisper(active_speech_list: &[ActiveSpeech], multi: &MultiProgress) {
         }
         pb.inc(1);
     }
+    let et = std::time::Instant::now();
+    println!("took {}ms", (et - st).as_millis());
     pb.finish();
     multi.remove(&pb);
     info!("Saving subs");
