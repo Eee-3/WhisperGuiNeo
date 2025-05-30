@@ -1,28 +1,42 @@
-use ffmpeg_next::{
-                  format::input,
-                  util::frame::audio::Audio,
-                  channel_layout::ChannelLayout,
-                  software,
-};
-use std::path::Path;
 use ffmpeg_next as ffmpeg;
 use ffmpeg_next::format::Sample;
-use ffmpeg_next::format::sample::Type::{ Planar};
+use ffmpeg_next::format::sample::Type::Planar;
+use ffmpeg_next::{
+    channel_layout::ChannelLayout, format::input, software, util::frame::audio::Audio,
+};
 use indicatif::{MultiProgress, ProgressBar};
 use indicatif_log_bridge::LogWrapper;
-use vad_rs::{Vad, VadStatus};
 use log::*;
-
+use std::error::Error;
+use std::path::Path;
+use vad_rs::{Vad, VadStatus};
+use whisper_rs::{
+    DtwModelPreset, FullParams, SamplingStrategy, WhisperContext, WhisperContextParameters,
+};
+use srtlib::{Timestamp, Subtitle, Subtitles};
+struct ActiveSpeech {
+    start_time: f32,
+    end_time: f32,
+    data: Vec<f32>,
+}
+impl ActiveSpeech {
+    fn new(start_time: f32, end_time: f32, data: Vec<f32>) -> Self {
+        Self {
+            start_time,
+            end_time,
+            data,
+        }
+    }
+}
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let logger =
         env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("debug"))
+            .filter_module("whisper_rs::whisper_logging_hook", LevelFilter::Info)
             .build();
     let level = logger.filter();
     let multi = MultiProgress::new();
 
-    LogWrapper::new(multi.clone(), logger)
-        .try_init()
-        .unwrap();
+    LogWrapper::new(multi.clone(), logger).try_init().unwrap();
     log::set_max_level(level);
     let input_path = Path::new("samples/ep0音轨.wav");
     // if input_path.extension().unwrap() == "wav" {
@@ -35,7 +49,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut ictx = input(input_path).unwrap();
 
     // 查找音频流
-    let stream = ictx.streams().best(ffmpeg_next::media::Type::Audio).unwrap();
+    let stream = ictx
+        .streams()
+        .best(ffmpeg_next::media::Type::Audio)
+        .unwrap();
     let audio_stream_index = stream.index();
 
     let context = ffmpeg::codec::context::Context::from_parameters(stream.parameters())?;
@@ -46,31 +63,28 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // 获取原始音频信息
     let original_sample_rate = decoder.rate();
-    let original_format=decoder.format();
+    let original_format = decoder.format();
     let original_channels = decoder.channels();
     //fill in default Channel layout if it's empty
-    if decoder.channel_layout().is_empty(){
+    if decoder.channel_layout().is_empty() {
         decoder.set_channel_layout(ChannelLayout::default(original_channels as i32));
     }
-    let original_channel_layout=decoder.channel_layout();
+    let original_channel_layout = decoder.channel_layout();
     info!("original_format: {:?}", original_format);
     info!("original_channel_layout: {:?}", original_channel_layout);
     info!("channels: {}", original_channels);
     info!("original_sample_rate: {}", original_sample_rate);
 
-
-
-
     // 创建重采样器
     let mut resampler = software::resampling::Context::get(
-       original_format,
-       original_channel_layout,
+        original_format,
+        original_channel_layout,
         original_sample_rate,
         Sample::I16(Planar),
         ChannelLayout::MONO,
         target_sample_rate,
     )
-        .unwrap();
+    .unwrap();
 
     let mut output_samples: Vec<f32> = Vec::new();
     let packets: Vec<_> = ictx.packets().collect();
@@ -85,10 +99,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
         decoder.send_packet(&packet).unwrap();
 
-
-        let mut decoded:Audio= Audio::empty();
+        let mut decoded: Audio = Audio::empty();
         while decoder.receive_frame(&mut decoded).is_ok() {
-
             // println!(
             //     "Frame: format={:?}, rate={}, channels={}, layout={:?}",
             //     decoded.format(),
@@ -108,16 +120,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             // for ch in 0..resampled.channels() {
             // println!("Resampled format: {:?}", resampled.format());
             for sample in resampled.plane::<i16>(0) {
-                let f32_sample=*sample as f32 / i16::MAX as f32;
+                let f32_sample = *sample as f32 / i16::MAX as f32;
                 output_samples.push(f32_sample);
             }
             // }
         }
-
     }
     pb.finish();
     multi.remove(&pb);
-
 
     // 输出结果
     debug!("Output samples count: {}", output_samples.len());
@@ -131,22 +141,26 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // let audio=Array1::from_vec(output_samples);
     let mut is_speech = false;
     let mut start_time = 0.0;
+    let mut full_audio_chunk: Vec<f32> = Vec::new();
+    let mut silence_min_samples=8000;
     let sample_rate = target_sample_rate as f32;
     let chunk_size = (0.1 * sample_rate) as usize;
 
     // Add 1s of silence to the end of the samples
     output_samples.extend(vec![0.0; sample_rate as usize]);
-    let chunks:Vec<_>=output_samples.chunks(chunk_size).enumerate().collect();
+    let chunks: Vec<_> = output_samples.chunks(chunk_size).enumerate().collect();
+    let mut active_speeches: Vec<ActiveSpeech> = Vec::new();
     let pb = multi.add(ProgressBar::new(chunks.len() as u64));
-
     for (i, chunk) in chunks {
         pb.inc(1);
         let time = i as f32 * chunk_size as f32 / sample_rate;
 
-        match vad.compute(chunk){
-            Ok(mut result)=>{
+        match vad.compute(chunk) {
+            Ok(mut result) => {
                 match result.status() {
                     VadStatus::Speech => {
+                        silence_min_samples = 8000;
+                        full_audio_chunk.extend_from_slice(chunk);
                         if !is_speech {
                             start_time = time;
                             is_speech = true;
@@ -154,19 +168,170 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     }
                     VadStatus::Silence => {
                         if is_speech {
-                            debug!("Speech detected from {:.2}s to {:.2}s", start_time, time);
+                            // debug!("Speech detected from {:.2}s to {:.2}s", start_time, time);
+                            if silence_min_samples > 0 {
+                                silence_min_samples-= chunk_size;
+                                full_audio_chunk.extend_from_slice(chunk);
+                                continue;
+                            }
+                            active_speeches.push(ActiveSpeech::new(
+                                start_time,
+                                time,
+                                full_audio_chunk.clone(),
+                            ));
                             is_speech = false;
+                            silence_min_samples = 8000;
+                            full_audio_chunk.clear();
                         }
                     }
                     _ => {}
                 }
             }
             Err(e) => {
-                error!("E:{:?}", e);
+                if let ort::ErrorCode::InvalidArgument = e
+                    .downcast_ref::<ort::Error>()
+                    .ok_or("Error downcasting error.")?
+                    .code()
+                {
+                    warn!(
+                        "Got an InvalidArgument error fro ort.This might be a normal behavior at the end of the audio."
+                    );
+                    is_speech = true;
+                } else {
+                    error!("Unknown error: {:?}", e);
+                }
+
+                // error!("E:{:?}", e);
             }
         }
     }
     pb.finish();
     multi.remove(&pb);
+    for speech in active_speeches.as_slice() {
+        debug!(
+            "Speech detected from {:.2}s to {:.2}s",
+            speech.start_time, speech.end_time
+        );
+        let spec = hound::WavSpec {
+            channels: 1,
+            sample_rate: target_sample_rate,
+            bits_per_sample: 32,
+            sample_format: hound::SampleFormat::Float,
+        };
+        let mut writer = hound::WavWriter::create(
+            format!(
+                "debug-output/output_{:.2}s-{:.2}s.wav",
+                speech.start_time, speech.end_time
+            ),
+            spec,
+        )
+        .unwrap();
+        for sample in speech.data.as_slice() {
+            writer.write_sample(*sample).unwrap();
+        }
+        writer.finalize().unwrap();
+    }
+    for speech in active_speeches.as_mut_slice() {
+        let len=speech.data.len();
+        if len< 15900 {
+            let padding_length = 16000 - len + 100;
+            let padding = vec![0.0; padding_length]; // 动态创建一个 Vec
+            speech.data.extend_from_slice(&padding); // 使用 extend_from_slice 扩展数据
+        }
+    }
+    do_whisper(&active_speeches, &multi);
+
     Ok(())
+}
+fn do_whisper(active_speech_list: &[ActiveSpeech], multi: &MultiProgress) {
+    whisper_rs::install_logging_hooks();
+    // Load a context and model.
+    let mut context_param = WhisperContextParameters::default();
+
+    // Enable DTW token level timestamp for known model by using model preset
+    // context_param.dtw_parameters.mode = whisper_rs::DtwMode::ModelPreset {
+    //     model_preset: whisper_rs::DtwModelPreset::Base,
+    // };
+
+    let ctx = WhisperContext::new_with_params("ggml-medium.bin", context_param)
+        .expect("failed to load model");
+    // Create a state
+    let mut state = ctx.create_state().expect("failed to create key");
+
+    // Create a params object for running the model.
+    // The number of past samples to consider defaults to 0.
+    let mut params = FullParams::new(SamplingStrategy::Greedy { best_of: 0 });
+
+    // Edit params as needed.
+    // Set the number of threads to use to 1.
+    params.set_n_threads(20);
+    // Enable translation.
+    params.set_translate(false);
+    // Set the language to translate to English.
+    params.set_language(Some("zh"));
+    // Disable anything that prints to stdout.
+    params.set_print_special(false);
+    params.set_print_progress(false);
+    params.set_print_realtime(false);
+    params.set_print_timestamps(false);
+    let prompt = "请输出简体中文";
+    params.set_initial_prompt(prompt);
+    
+    
+    let mut subs = Subtitles::new();
+    let mut num=1;
+    
+    
+    // Enable token level timestamps
+    // params.set_token_timestamps(true);
+    let pb = multi.add(ProgressBar::new(active_speech_list.len() as u64));
+    // Open the audio file.
+    for active_speech in active_speech_list.iter() {
+        let s = active_speech.data.to_vec();
+        // s.extend(vec![0.0; 16000usize]);
+        state.full(params.clone(), &s).expect("failed to run model");
+
+        // Create a file to write the transcript to.
+
+        // Iterate through the segments of the transcript.
+        let num_segments = state
+            .full_n_segments()
+            .expect("failed to get number of segments");
+        // debug!("num_segments: {}", num_segments);
+        for i in 0..num_segments {
+            // Get the transcribed text and timestamps for the current segment.
+            let segment = state
+                .full_get_segment_text(i)
+                .expect("failed to get segment")
+                .replacen(prompt, "", 1);
+            let start_timestamp = state
+                .full_get_segment_t0(i)
+                .expect("failed to get start timestamp");
+            let end_timestamp = state
+                .full_get_segment_t1(i)
+                .expect("failed to get end timestamp");
+            let start_time_ms=start_timestamp*10+((active_speech.start_time*1000.0) as i64);
+            let mut end_time_ms=end_timestamp*10+((active_speech.start_time*1000.0) as i64);
+            if end_time_ms > (active_speech.end_time*1000.0) as i64 {
+                end_time_ms=(active_speech.end_time*1000.0) as i64;
+            }
+
+            info!(
+    "[{} - {}]: {}",
+    start_time_ms, end_time_ms,  segment
+);
+            let start_timestamp=Timestamp::from_milliseconds(start_time_ms as u32);
+            let end_timestamp=Timestamp::from_milliseconds(end_time_ms as u32);
+            
+
+            // Add subtitle at the end of the subs collection.
+            subs.push(Subtitle::new(num, start_timestamp, end_timestamp, segment));
+            num+=1;
+        }
+        pb.inc(1);
+    }
+    pb.finish();
+    multi.remove(&pb);
+    info!("Saving subs");
+    subs.write_to_file("output.srt", None).unwrap();
 }

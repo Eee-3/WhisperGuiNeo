@@ -2,3 +2,4 @@
 FFMPEG_DIR = "D:/code/projects/whisper_with_vad/ffmpeg-7.1.1"
 LIBCLANG_PATH = "D:/clang+llvm-x86_64-pc-windows-msvc/bin"
 Path = "D:/code/projects/whisper_with_vad/ffmpeg-7.1.1/bin"
+CL = "/utf-8"

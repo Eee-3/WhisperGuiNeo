@@ -10,3 +10,8 @@ vad-rs = { version = "0.1.5" ,features = ["default","directml"]}
 log = "0.4.27"
 indicatif = "0.17.11"
 indicatif-log-bridge = "0.2.3"
+ort = {version = "2.0.0-rc.9"}
+whisper-rs = { version = "0.14.2" ,features = ["default","log_backend"]}
+hound = "3.5.1"
+srtlib = "0.2.0"
+
