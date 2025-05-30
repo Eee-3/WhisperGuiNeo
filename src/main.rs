@@ -7,7 +7,6 @@ use ffmpeg_next::{
 use indicatif::{MultiProgress, ProgressBar};
 use indicatif_log_bridge::LogWrapper;
 use log::*;
-use std::error::Error;
 use std::path::Path;
 use vad_rs::{Vad, VadStatus};
 use whisper_rs::{
@@ -37,12 +36,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let multi = MultiProgress::new();
 
     LogWrapper::new(multi.clone(), logger).try_init().unwrap();
-    log::set_max_level(level);
+    set_max_level(level);
     let input_path = Path::new("samples/ep0音轨.wav");
     // if input_path.extension().unwrap() == "wav" {
     //     warn!("There's an unknown issue that prevent wav file from resampling.\n\
     //            Please convert this audio to any other format to continue");
-    //     // return Err(Box::from("File extgension not supported"));
+    //     // return Err(Box::from("File extension not supported"));
     // }
 
     // 打开输入文件
@@ -324,7 +323,7 @@ fn do_whisper(active_speech_list: &[ActiveSpeech], multi: &MultiProgress) {
             let end_timestamp=Timestamp::from_milliseconds(end_time_ms as u32);
             
 
-            // Add subtitle at the end of the subs collection.
+            // Add subtitle at the end of the subs' collection.
             subs.push(Subtitle::new(num, start_timestamp, end_timestamp, segment));
             num+=1;
         }
