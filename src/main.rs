@@ -9,6 +9,7 @@ use indicatif::{MultiProgress, ProgressBar};
 use indicatif_log_bridge::LogWrapper;
 use log::*;
 use std::path::Path;
+use clap::builder::Str;
 use clap::Parser;
 use vad_rs::{Vad, VadStatus};
 use whisper_rs::{
@@ -16,13 +17,17 @@ use whisper_rs::{
 };
 use srtlib::{Timestamp, Subtitle, Subtitles};
 #[derive(Parser, Debug)]
-#[command(version, about, long_about = None)]
+#[command(version, about=None, long_about = None)]
 struct Args {
     #[arg(short='i', long)]
     input: String,
     
     #[arg(short='o', long)]
     output: String,
+    #[arg(short='v', long,default_value = "./models/silero_vad.onnx")]
+    vad_model:String,
+    #[arg(short='w', long,default_value = "./models/ggml-large-v3-turbo.bin")]
+    whisper_model:String,
 }
 struct ActiveSpeech {
     start_time: f32,
@@ -59,18 +64,18 @@ fn main() -> Result<(), Box<dyn Error>> {
     // }
 
     let mut output_samples=do_resample(&multi,target_sample_rate,input_path)?;
-    let active_speeches = do_vad(&multi, target_sample_rate, &mut output_samples)?;
-    let subs=do_whisper(&active_speeches, &multi)?;
+    let active_speeches = do_vad(&multi, target_sample_rate, &args.vad_model, &mut output_samples)?;
+    let subs=do_whisper(&multi, &args.whisper_model, &active_speeches)?;
     info!("Saving subs");
     subs.write_to_file(args.output, None).unwrap();
 
     Ok(())
 }
 
-fn do_vad(multi: &MultiProgress, target_sample_rate: u32, output_samples: &mut Vec<f32>) -> Result<Vec<ActiveSpeech>, Box<dyn Error>> {
+fn do_vad(multi: &MultiProgress, target_sample_rate: u32,model_path:&str, output_samples: &mut Vec<f32>) -> Result<Vec<ActiveSpeech>, Box<dyn Error>> {
     // println!("Output samples bytes: {:?}", output_samples);
     // Load the model
-    let model_path = "models/silero_vad.onnx";
+    // let model_path = "models/silero_vad.onnx";
 
     // Create a VAD iterator
     let mut vad = Vad::new(model_path, target_sample_rate.try_into().unwrap())?;
@@ -280,7 +285,7 @@ fn do_resample(multi: &MultiProgress, target_sample_rate: u32, input_path: &Path
     Ok(output_samples)
 }
 
-fn do_whisper(active_speech_list: &[ActiveSpeech], multi: &MultiProgress)->Result<Subtitles, Box<dyn Error>> {
+fn do_whisper(multi: &MultiProgress,model_path:&str,active_speech_list: &[ActiveSpeech])->Result<Subtitles, Box<dyn Error>> {
     // Install a hook to log any errors from the whisper C++ code.
     whisper_rs::install_logging_hooks();
     // Load a context and model.
@@ -291,7 +296,7 @@ fn do_whisper(active_speech_list: &[ActiveSpeech], multi: &MultiProgress)->Resul
         model_preset: DtwModelPreset::LargeV3Turbo,
     };
 
-    let ctx = WhisperContext::new_with_params("ggml-large-v3-turbo.bin", context_param)
+    let ctx = WhisperContext::new_with_params(model_path, context_param)
         .expect("failed to load model");
     // Create a state
     let mut state = ctx.create_state().expect("failed to create key");
