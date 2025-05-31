@@ -9,11 +9,21 @@ use indicatif::{MultiProgress, ProgressBar};
 use indicatif_log_bridge::LogWrapper;
 use log::*;
 use std::path::Path;
+use clap::Parser;
 use vad_rs::{Vad, VadStatus};
 use whisper_rs::{
     DtwModelPreset, FullParams, SamplingStrategy, WhisperContext, WhisperContextParameters,
 };
 use srtlib::{Timestamp, Subtitle, Subtitles};
+#[derive(Parser, Debug)]
+#[command(version, about, long_about = None)]
+struct Args {
+    #[arg(short='i', long)]
+    input: String,
+    
+    #[arg(short='o', long)]
+    output: String,
+}
 struct ActiveSpeech {
     start_time: f32,
     end_time: f32,
@@ -38,9 +48,10 @@ fn main() -> Result<(), Box<dyn Error>> {
 
     LogWrapper::new(multi.clone(), logger).try_init().unwrap();
     set_max_level(level);
+    let args = Args::parse();
     // 设置目标采样率
     let target_sample_rate = 16000;
-    let input_path = Path::new("samples/ep0音轨.wav");
+    let input_path = Path::new(args.input.as_str());
     // if input_path.extension().unwrap() == "wav" {
     //     warn!("There's an unknown issue that prevent wav file from resampling.\n\
     //            Please convert this audio to any other format to continue");
@@ -49,7 +60,9 @@ fn main() -> Result<(), Box<dyn Error>> {
 
     let mut output_samples=do_resample(&multi,target_sample_rate,input_path)?;
     let active_speeches = do_vad(&multi, target_sample_rate, &mut output_samples)?;
-    do_whisper(&active_speeches, &multi);
+    let subs=do_whisper(&active_speeches, &multi)?;
+    info!("Saving subs");
+    subs.write_to_file(args.output, None).unwrap();
 
     Ok(())
 }
@@ -117,7 +130,7 @@ fn do_vad(multi: &MultiProgress, target_sample_rate: u32, output_samples: &mut V
                                 let padding_length = 16000 - len + 100;
                                 let padding = vec![0.0; padding_length]; // 动态创建一个 Vec
                                 full_audio_chunk.extend_from_slice(&padding); // 使用 extend_from_slice 扩展数据
-                                
+
                             } else {
                                 active_speeches.push(ActiveSpeech::new(
                                     start_time,
@@ -267,7 +280,8 @@ fn do_resample(multi: &MultiProgress, target_sample_rate: u32, input_path: &Path
     Ok(output_samples)
 }
 
-fn do_whisper(active_speech_list: &[ActiveSpeech], multi: &MultiProgress) {
+fn do_whisper(active_speech_list: &[ActiveSpeech], multi: &MultiProgress)->Result<Subtitles, Box<dyn Error>> {
+    // Install a hook to log any errors from the whisper C++ code.
     whisper_rs::install_logging_hooks();
     // Load a context and model.
     let mut context_param = WhisperContextParameters::default();
@@ -359,6 +373,5 @@ fn do_whisper(active_speech_list: &[ActiveSpeech], multi: &MultiProgress) {
     println!("took {}ms", (et - st).as_millis());
     pb.finish();
     multi.remove(&pb);
-    info!("Saving subs");
-    subs.write_to_file("output.srt", None).unwrap();
+    Ok(subs)
 }

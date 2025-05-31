@@ -14,4 +14,6 @@ ort = {version = "2.0.0-rc.9"}
 whisper-rs = { version = "0.14.2" ,features = ["default","log_backend","vulkan"]}
 hound = "3.5.1"
 srtlib = "0.2.0"
+clap = { version = "4.5.39", features = ["derive"] }
+
 
