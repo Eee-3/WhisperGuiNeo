@@ -1,3 +1,4 @@
+use std::error::Error;
 use ffmpeg_next as ffmpeg;
 use ffmpeg_next::format::Sample;
 use ffmpeg_next::format::sample::Type::Planar;
@@ -37,6 +38,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     LogWrapper::new(multi.clone(), logger).try_init().unwrap();
     set_max_level(level);
+    // 设置目标采样率
+    let target_sample_rate = 16000;
     let input_path = Path::new("samples/ep0音轨.wav");
     // if input_path.extension().unwrap() == "wav" {
     //     warn!("There's an unknown issue that prevent wav file from resampling.\n\
@@ -44,6 +47,140 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     //     // return Err(Box::from("File extension not supported"));
     // }
 
+    let mut output_samples=do_resample(&multi,target_sample_rate,input_path)?;
+    let active_speeches = do_vad(&multi, target_sample_rate, &mut output_samples)?;
+    do_whisper(&active_speeches, &multi);
+
+    Ok(())
+}
+
+fn do_vad(multi: &MultiProgress, target_sample_rate: u32, output_samples: &mut Vec<f32>) -> Result<Vec<ActiveSpeech>, Box<dyn Error>> {
+    // println!("Output samples bytes: {:?}", output_samples);
+    // Load the model
+    let model_path = "models/silero_vad.onnx";
+
+    // Create a VAD iterator
+    let mut vad = Vad::new(model_path, target_sample_rate.try_into().unwrap())?;
+
+    // let audio=Array1::from_vec(output_samples);
+    let mut is_speech = false;
+    let mut start_time = 0.0;
+    let mut full_audio_chunk: Vec<f32> = Vec::new();
+    let silence_min_samples = 3200;
+    let mut silence_samples = 0;
+    let sample_rate = target_sample_rate as f32;
+    let chunk_size = (0.1 * sample_rate) as usize;
+
+    // Add 1s of silence to the end of the samples
+    output_samples.extend(vec![0.0; sample_rate as usize]);
+    let chunks: Vec<_> = output_samples.chunks(chunk_size).enumerate().collect();
+    let mut active_speeches: Vec<ActiveSpeech> = Vec::new();
+    let pb = multi.add(ProgressBar::new(chunks.len() as u64));
+    for (i, chunk) in chunks {
+        pb.inc(1);
+        let time = i as f32 * chunk_size as f32 / sample_rate;
+
+        match vad.compute(chunk) {
+            Ok(result) => {
+                let status = if result.prob > 0.35 {
+                    VadStatus::Speech
+                } else {
+                    VadStatus::Silence
+                };
+                match status {
+                    VadStatus::Speech => {
+                        silence_samples = 0;
+                        full_audio_chunk.extend_from_slice(chunk);
+                        if !is_speech {
+                            start_time = time;
+                            is_speech = true;
+                        }
+                    }
+                    VadStatus::Silence => {
+                        if is_speech {
+                            // debug!("Speech detected from {:.2}s to {:.2}s", start_time, time);
+                            if silence_samples < silence_min_samples {
+                                silence_samples += chunk_size;
+                                full_audio_chunk.extend_from_slice(chunk);
+                                continue;
+                            }
+                            let len = full_audio_chunk.len();
+                            let duration = len as f32 / sample_rate;
+                            if duration > 60.0 {
+                                warn!("Found a {:.2}s at {}s-{}s chunks which is longer than 60.0s.Forced slicing into 2s pieces...",duration,start_time,time);
+                                for (idx, slices) in full_audio_chunk.chunks(16000 * 2).enumerate() {
+                                    let new_start_time = start_time + (idx as f32) * 2.0;
+                                    active_speeches.push(ActiveSpeech::new(new_start_time, new_start_time + (slices.len() as f32) / sample_rate, slices.to_vec()));
+                                }
+                            } else if duration<1.01{
+                                warn!("Found a {:.2}s at {}s-{}s chunks which is shorter than 1.01s.Extending to 1.01s...",duration,start_time,time);
+                                let padding_length = 16000 - len + 100;
+                                let padding = vec![0.0; padding_length]; // 动态创建一个 Vec
+                                full_audio_chunk.extend_from_slice(&padding); // 使用 extend_from_slice 扩展数据
+                                
+                            } else {
+                                active_speeches.push(ActiveSpeech::new(
+                                    start_time,
+                                    time,
+                                    full_audio_chunk.clone(),
+                                ));
+                            }
+                            is_speech = false;
+                            silence_samples = 0;
+                            full_audio_chunk.clear();
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            Err(e) => {
+                if let ort::ErrorCode::InvalidArgument = e
+                    .downcast_ref::<ort::Error>()
+                    .ok_or("Error downcasting error.")?
+                    .code()
+                {
+                    warn!(
+                        "Got an InvalidArgument error fro ort.This might be a normal behavior at the end of the audio."
+                    );
+                    is_speech = true;
+                } else {
+                    error!("Unknown error: {:?}", e);
+                }
+
+                // error!("E:{:?}", e);
+            }
+        }
+    }
+    pb.finish();
+    multi.remove(&pb);
+    // for speech in active_speeches.as_slice() {
+    //     debug!(
+    //         " {:.2}s Speech detected from {:.2}s to {:.2}s",
+    //         speech.end_time-speech.start_time,speech.start_time, speech.end_time
+    //     );
+    //     let spec = hound::WavSpec {
+    //         channels: 1,
+    //         sample_rate: target_sample_rate,
+    //         bits_per_sample: 32,
+    //         sample_format: hound::SampleFormat::Float,
+    //     };
+    //     let mut writer = hound::WavWriter::create(
+    //         format!(
+    //             "debug-output/output_{:.2}s-{:.2}s.wav",
+    //             speech.start_time, speech.end_time
+    //         ),
+    //         spec,
+    //     )
+    //         .unwrap();
+    //     for sample in speech.data.as_slice() {
+    //         writer.write_sample(*sample).unwrap();
+    //     }
+    //     writer.finalize().unwrap();
+    // }
+    Ok(active_speeches)
+}
+
+fn do_resample(multi: &MultiProgress, target_sample_rate: u32, input_path: &Path) -> Result<Vec<f32>, Box<dyn Error>> {
     // 打开输入文件
     let mut ictx = input(input_path).unwrap();
 
@@ -56,9 +193,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let context = ffmpeg::codec::context::Context::from_parameters(stream.parameters())?;
     let mut decoder = context.decoder().audio()?;
-
-    // 设置目标采样率
-    let target_sample_rate = 16000;
 
     // 获取原始音频信息
     let original_sample_rate = decoder.rate();
@@ -83,7 +217,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         ChannelLayout::MONO,
         target_sample_rate,
     )
-    .unwrap();
+        .unwrap();
 
     let mut output_samples: Vec<f32> = Vec::new();
     let packets: Vec<_> = ictx.packets().collect();
@@ -130,136 +264,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // 输出结果
     debug!("Output samples count: {}", output_samples.len());
-    // println!("Output samples bytes: {:?}", output_samples);
-    // Load the model
-    let model_path = "models/silero_vad.onnx";
-
-    // Create a VAD iterator
-    let mut vad = Vad::new(model_path, target_sample_rate.try_into().unwrap())?;
-
-    // let audio=Array1::from_vec(output_samples);
-    let mut is_speech = false;
-    let mut start_time = 0.0;
-    let mut full_audio_chunk: Vec<f32> = Vec::new();
-    let silence_min_samples=3200;
-    let mut silence_samples=0;
-    let sample_rate = target_sample_rate as f32;
-    let chunk_size = (0.1 * sample_rate) as usize;
-
-    // Add 1s of silence to the end of the samples
-    output_samples.extend(vec![0.0; sample_rate as usize]);
-    let chunks: Vec<_> = output_samples.chunks(chunk_size).enumerate().collect();
-    let mut active_speeches: Vec<ActiveSpeech> = Vec::new();
-    let pb = multi.add(ProgressBar::new(chunks.len() as u64));
-    for (i, chunk) in chunks {
-        pb.inc(1);
-        let time = i as f32 * chunk_size as f32 / sample_rate;
-
-        match vad.compute(chunk) {
-            Ok(result) => {
-                let status=if result.prob > 0.35 {
-                    VadStatus::Speech
-                } else {
-                    VadStatus::Silence
-                };
-                match status {
-                    VadStatus::Speech => {
-                        silence_samples = 0;
-                        full_audio_chunk.extend_from_slice(chunk);
-                        if !is_speech {
-                            start_time = time;
-                            is_speech = true;
-                        }
-                    }
-                    VadStatus::Silence => {
-                        if is_speech {
-                            // debug!("Speech detected from {:.2}s to {:.2}s", start_time, time);
-                            if silence_samples < silence_min_samples {
-                                silence_samples+= chunk_size;
-                                full_audio_chunk.extend_from_slice(chunk);
-                                continue;
-                            }
-                            let len=full_audio_chunk.len();
-                            let duration =len as f32 / sample_rate;
-                            if duration> 60.0 {
-                                warn!("Found a {:.2}s at {}s-{}s chunks which is longer than 60.0s.Forced slicing into 2s pieces...",duration,start_time,time);
-                                for (idx,slices) in  full_audio_chunk.chunks(16000*2).enumerate() {
-                                    let new_start_time = start_time + (idx as f32) *2.0;
-                                    active_speeches.push(ActiveSpeech::new(new_start_time, new_start_time + (slices.len() as f32)/sample_rate, slices.to_vec()));
-                                }
-                            } else {
-                                active_speeches.push(ActiveSpeech::new(
-                                    start_time,
-                                    time,
-                                    full_audio_chunk.clone(),
-                                ));
-                            }
-                            is_speech = false;
-                            silence_samples = 0;
-                            full_audio_chunk.clear();
-                        }
-                    }
-                    _ => {}
-                }
-            }
-            Err(e) => {
-                if let ort::ErrorCode::InvalidArgument = e
-                    .downcast_ref::<ort::Error>()
-                    .ok_or("Error downcasting error.")?
-                    .code()
-                {
-                    warn!(
-                        "Got an InvalidArgument error fro ort.This might be a normal behavior at the end of the audio."
-                    );
-                    is_speech = true;
-                } else {
-                    error!("Unknown error: {:?}", e);
-                }
-
-                // error!("E:{:?}", e);
-            }
-        }
-    }
-    pb.finish();
-    multi.remove(&pb);
-    for speech in active_speeches.as_slice() {
-        debug!(
-            " {:.2}s Speech detected from {:.2}s to {:.2}s",
-            speech.end_time-speech.start_time,speech.start_time, speech.end_time
-        );
-        let spec = hound::WavSpec {
-            channels: 1,
-            sample_rate: target_sample_rate,
-            bits_per_sample: 32,
-            sample_format: hound::SampleFormat::Float,
-        };
-        let mut writer = hound::WavWriter::create(
-            format!(
-                "debug-output/output_{:.2}s-{:.2}s.wav",
-                speech.start_time, speech.end_time
-            ),
-            spec,
-        )
-        .unwrap();
-        for sample in speech.data.as_slice() {
-            writer.write_sample(*sample).unwrap();
-        }
-        writer.finalize().unwrap();
-    }
-    for (_,speech) in active_speeches.iter_mut().enumerate() {
-        let len=speech.data.len();
-        let time =len as f32 / sample_rate;
-        if time< 1.01 {
-            let padding_length = 16000 - len + 100;
-            let padding = vec![0.0; padding_length]; // 动态创建一个 Vec
-            speech.data.extend_from_slice(&padding); // 使用 extend_from_slice 扩展数据
-        }
-        
-    }
-    do_whisper(&active_speeches, &multi);
-
-    Ok(())
+    Ok(output_samples)
 }
+
 fn do_whisper(active_speech_list: &[ActiveSpeech], multi: &MultiProgress) {
     whisper_rs::install_logging_hooks();
     // Load a context and model.
@@ -294,12 +301,12 @@ fn do_whisper(active_speech_list: &[ActiveSpeech], multi: &MultiProgress) {
     // params.set_no_context(true);
     let prompt = "请输出简体中文";
     params.set_initial_prompt(prompt);
-    
-    
+
+
     let mut subs = Subtitles::new();
     let mut num=1;
-    
-    
+
+
     // Enable token level timestamps
     params.set_token_timestamps(true);
     let pb = multi.add(ProgressBar::new(active_speech_list.len() as u64));
@@ -340,7 +347,7 @@ fn do_whisper(active_speech_list: &[ActiveSpeech], multi: &MultiProgress) {
 );
             let start_timestamp=Timestamp::from_milliseconds(start_time_ms as u32);
             let end_timestamp=Timestamp::from_milliseconds(end_time_ms as u32);
-            
+
 
             // Add subtitle at the end of the subs' collection.
             subs.push(Subtitle::new(num, start_timestamp, end_timestamp, segment));
