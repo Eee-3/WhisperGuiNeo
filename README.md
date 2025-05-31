@@ -4,4 +4,4 @@
 ## TODO
 1. #### 核心逻辑 Ok
 2. #### cli Ok
-3. #### ctui(maybe) / gui
+3. #### tui(maybe) / gui
