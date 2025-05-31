@@ -8,7 +8,6 @@ use indicatif::{MultiProgress, ProgressBar};
 use indicatif_log_bridge::LogWrapper;
 use log::*;
 use std::path::Path;
-use ffmpeg_next::ffi::int_fast8_t;
 use vad_rs::{Vad, VadStatus};
 use whisper_rs::{
     DtwModelPreset, FullParams, SamplingStrategy, WhisperContext, WhisperContextParameters,
@@ -142,7 +141,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut is_speech = false;
     let mut start_time = 0.0;
     let mut full_audio_chunk: Vec<f32> = Vec::new();
-    let silence_min_samples=5;
+    let silence_min_samples=3200;
     let mut silence_samples=0;
     let sample_rate = target_sample_rate as f32;
     let chunk_size = (0.1 * sample_rate) as usize;
@@ -157,8 +156,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let time = i as f32 * chunk_size as f32 / sample_rate;
 
         match vad.compute(chunk) {
-            Ok(mut result) => {
-                let status=if result.prob > 0.40 {
+            Ok(result) => {
+                let status=if result.prob > 0.35 {
                     VadStatus::Speech
                 } else {
                     VadStatus::Silence
@@ -182,9 +181,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             }
                             let len=full_audio_chunk.len();
                             let duration =len as f32 / sample_rate;
-                            if duration> 100000000.0 {
-                                for (idx,slices) in  full_audio_chunk.chunks(16000*5).enumerate() {
-                                    let new_start_time = start_time + (idx as f32) *5.0;
+                            if duration> 60.0 {
+                                warn!("Found a {:.2}s at {}s-{}s chunks which is longer than 60.0s.Forced slicing into 2s pieces...",duration,start_time,time);
+                                for (idx,slices) in  full_audio_chunk.chunks(16000*2).enumerate() {
+                                    let new_start_time = start_time + (idx as f32) *2.0;
                                     active_speeches.push(ActiveSpeech::new(new_start_time, new_start_time + (slices.len() as f32)/sample_rate, slices.to_vec()));
                                 }
                             } else {
@@ -246,12 +246,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
         writer.finalize().unwrap();
     }
-    struct ActiveSpeechProcessInfo {
-        idx: usize,
-        new_items:Vec<ActiveSpeech>,
-    }
-    let mut speeches_to_process:Vec<ActiveSpeechProcessInfo>=Vec::new();
-    for (idx,speech) in active_speeches.iter_mut().enumerate() {
+    for (_,speech) in active_speeches.iter_mut().enumerate() {
         let len=speech.data.len();
         let time =len as f32 / sample_rate;
         if time< 1.01 {
@@ -272,7 +267,7 @@ fn do_whisper(active_speech_list: &[ActiveSpeech], multi: &MultiProgress) {
 
     // Enable DTW token level timestamp for known model by using model preset
     context_param.dtw_parameters.mode = whisper_rs::DtwMode::ModelPreset {
-        model_preset: whisper_rs::DtwModelPreset::LargeV3Turbo,
+        model_preset: DtwModelPreset::LargeV3Turbo,
     };
 
     let ctx = WhisperContext::new_with_params("ggml-large-v3-turbo.bin", context_param)
@@ -326,7 +321,7 @@ fn do_whisper(active_speech_list: &[ActiveSpeech], multi: &MultiProgress) {
             let segment = state
                 .full_get_segment_text(i)
                 .expect("failed to get segment")
-                .replacen(prompt, "", 1);
+                .replace(prompt, "");
             let start_timestamp = state
                 .full_get_segment_t0(i)
                 .expect("failed to get start timestamp");
