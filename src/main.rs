@@ -28,9 +28,9 @@ impl ActiveSpeech {
         }
     }
 }
-fn main() -> Result<(), Box<dyn std::error::Error>> {
+fn main() -> Result<(), Box<dyn Error>> {
     let logger =
-        env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("debug"))
+        env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info"))
             .filter_module("whisper_rs::whisper_logging_hook", LevelFilter::Info)
             .build();
     let level = logger.filter();
@@ -107,13 +107,13 @@ fn do_vad(multi: &MultiProgress, target_sample_rate: u32, output_samples: &mut V
                             let len = full_audio_chunk.len();
                             let duration = len as f32 / sample_rate;
                             if duration > 60.0 {
-                                warn!("Found a {:.2}s at {}s-{}s chunks which is longer than 60.0s.Forced slicing into 2s pieces...",duration,start_time,time);
+                                warn!("Found a {:.2}s chunks at {}s-{}s which is longer than 60.0s.Forced slicing into 2s pieces...",duration,start_time,time);
                                 for (idx, slices) in full_audio_chunk.chunks(16000 * 2).enumerate() {
                                     let new_start_time = start_time + (idx as f32) * 2.0;
                                     active_speeches.push(ActiveSpeech::new(new_start_time, new_start_time + (slices.len() as f32) / sample_rate, slices.to_vec()));
                                 }
                             } else if duration<1.01{
-                                warn!("Found a {:.2}s at {}s-{}s chunks which is shorter than 1.01s.Extending to 1.01s...",duration,start_time,time);
+                                warn!("Found a {:.2}s chunks at {}s-{}s which is shorter than 1.01s.Extending to 1.01s...",duration,start_time,time);
                                 let padding_length = 16000 - len + 100;
                                 let padding = vec![0.0; padding_length]; // 动态创建一个 Vec
                                 full_audio_chunk.extend_from_slice(&padding); // 使用 extend_from_slice 扩展数据
