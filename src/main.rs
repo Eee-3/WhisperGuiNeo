@@ -1,21 +1,19 @@
 use std::error::Error;
-use ffmpeg_next as ffmpeg;
-use ffmpeg_next::format::Sample;
-use ffmpeg_next::format::sample::Type::Planar;
-use ffmpeg_next::{
-    channel_layout::ChannelLayout, format::input, software, util::frame::audio::Audio,
-};
+use std::path::Path;
+use log::*;
+use clap::Parser;
 use indicatif::{MultiProgress, ProgressBar};
 use indicatif_log_bridge::LogWrapper;
-use log::*;
-use std::path::Path;
-use clap::builder::Str;
-use clap::Parser;
 use vad_rs::{Vad, VadStatus};
+use srtlib::{Timestamp, Subtitle, Subtitles};
+use ffmpeg_next::{
+    channel_layout::ChannelLayout, format::input, software, util::frame::audio::Audio,format::Sample,
+    format::sample::Type::Planar,codec::Context,
+};
 use whisper_rs::{
     DtwModelPreset, FullParams, SamplingStrategy, WhisperContext, WhisperContextParameters,
 };
-use srtlib::{Timestamp, Subtitle, Subtitles};
+
 #[derive(Parser, Debug)]
 #[command(version, about=None, long_about = None)]
 struct Args {
@@ -209,7 +207,7 @@ fn do_resample(multi: &MultiProgress, target_sample_rate: u32, input_path: &Path
         .unwrap();
     let audio_stream_index = stream.index();
 
-    let context = ffmpeg::codec::context::Context::from_parameters(stream.parameters())?;
+    let context = Context::from_parameters(stream.parameters())?;
     let mut decoder = context.decoder().audio()?;
 
     // 获取原始音频信息
