@@ -40,6 +40,7 @@ struct Args {
     whisper_model: String,
 
     #[arg(
+        short='l',
         long,
         default_value = "zh",
         help = "Language code for transcription (e.g., 'en', 'zh')."
@@ -47,6 +48,7 @@ struct Args {
     language: String,
 
     #[arg(
+        short='p',
         long,
         default_value = "",
         help = "Initial prompt for the Whisper model to guide transcription."
