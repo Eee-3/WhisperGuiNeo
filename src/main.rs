@@ -1,32 +1,80 @@
-use std::error::Error;
-use std::path::Path;
-use log::*;
 use clap::Parser;
+use ffmpeg_next::{
+    channel_layout::ChannelLayout, codec::Context, format::Sample, format::input,
+    format::sample::Type::Planar, software, util::frame::audio::Audio,
+};
 use indicatif::{MultiProgress, ProgressBar};
 use indicatif_log_bridge::LogWrapper;
+use log::*;
+use srtlib::{Subtitle, Subtitles, Timestamp};
+use std::error::Error;
+use std::path::Path;
 use vad_rs::{Vad, VadStatus};
-use srtlib::{Timestamp, Subtitle, Subtitles};
-use ffmpeg_next::{
-    channel_layout::ChannelLayout, format::input, software, util::frame::audio::Audio,format::Sample,
-    format::sample::Type::Planar,codec::Context,
-};
 use whisper_rs::{
     DtwModelPreset, FullParams, SamplingStrategy, WhisperContext, WhisperContextParameters,
 };
 
-#[derive(Parser, Debug)]
+#[derive(Parser, Debug, Clone)]
 #[command(version, about=None, long_about = None)]
 struct Args {
-    #[arg(short='i', long)]
+    #[arg(short = 'i', long, help = "Path to the input audio file.")]
     input: String,
-    
-    #[arg(short='o', long)]
+
+    #[arg(short = 'o', long, help = "Path to save the output SRT file.")]
     output: String,
-    #[arg(short='v', long,default_value = "./models/silero_vad.onnx")]
-    vad_model:String,
-    #[arg(short='w', long,default_value = "./models/ggml-large-v3-turbo.bin")]
-    whisper_model:String,
+
+    #[arg(
+        short = 'v',
+        long,
+        default_value = "./models/silero_vad.onnx",
+        help = "Path to the Silero VAD ONNX model."
+    )]
+    vad_model: String,
+
+    #[arg(
+        short = 'w',
+        long,
+        default_value = "./models/ggml-large-v3-turbo.bin",
+        help = "Path to the Whisper GGML model file (e.g., ggml-large-v3-turbo.bin)."
+    )]
+    whisper_model: String,
+
+    #[arg(
+        long,
+        default_value = "zh",
+        help = "Language code for transcription (e.g., 'en', 'zh')."
+    )]
+    language: String,
+
+    #[arg(
+        long,
+        default_value = "",
+        help = "Initial prompt for the Whisper model to guide transcription."
+    )]
+    initial_prompt: String,
+
+    #[arg(
+        long,
+        default_value = "INFO",
+        help = "Logging level (e.g., TRACE, DEBUG, INFO, WARN, ERROR)."
+    )]
+    log_level: String,
 }
+
+#[cfg(debug_assertions)]
+fn get_debug_mode_args() -> Args {
+    // info!(\"DEBUG MODE: Using default arguments for testing.\"); // Moved to main after logger init
+    Args {
+        input: "./samples/test2_cn.wav".to_string(),
+        output: "./default_test_output.srt".to_string(),
+        vad_model: "./models/silero_vad.onnx".to_string(), // Or use Args::default().vad_model if you prefer to derive Default
+        whisper_model: "./models/ggml-large-v3-turbo.bin".to_string(), // Or use Args::default().whisper_model
+        language: "zh".to_string(),
+        initial_prompt: "".to_string(),
+        log_level: "DEBUG".to_string(), // More verbose logging for the app itself in debug
+    }
+}
+
 struct ActiveSpeech {
     start_time: f32,
     end_time: f32,
@@ -42,18 +90,57 @@ impl ActiveSpeech {
     }
 }
 fn main() -> Result<(), Box<dyn Error>> {
-    let logger =
-        env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info"))
-            .filter_module("whisper_rs::whisper_logging_hook", LevelFilter::Info)
-            .build();
+    let args: Args; // Declare args, to be initialized based on mode
+
+    #[cfg(debug_assertions)]
+    {
+        // In debug mode, if no command-line arguments are provided (just 'cargo run'),
+        // then use the hardcoded debug defaults.
+        // std::env::args_os().count() == 1 means only the program name was passed.
+        if std::env::args_os().count() == 1 {
+            args = get_debug_mode_args();
+        } else {
+            // User provided CLI args in debug mode, parse them.
+            // Clap will enforce required args if they are not all provided.
+            args = Args::parse();
+        }
+    }
+    #[cfg(not(debug_assertions))]
+    {
+        // In release mode, always parse arguments. Clap will enforce required ones.
+        args = Args::parse();
+    }
+
+    // Logger setup using args.log_level from the effectively chosen args
+    let logger = env_logger::Builder::from_env(
+        env_logger::Env::default().default_filter_or(&args.log_level),
+    )
+    .filter_module("whisper_rs::whisper_logging_hook", LevelFilter::Info) // This ensures whisper_rs logs at INFO max
+    .build();
     let level = logger.filter();
     let multi = MultiProgress::new();
 
     LogWrapper::new(multi.clone(), logger).try_init().unwrap();
     set_max_level(level);
-    let args = Args::parse();
-    // 设置目标采样率
-    let target_sample_rate = 16000;
+
+    #[cfg(debug_assertions)]
+    {
+        if std::env::args_os().count() == 1 {
+            info!(
+                "DEBUG MODE ACTIVE: No CLI args detected, using default arguments. Effective args: {:?}",
+                args
+            );
+        } else {
+            info!(
+                "DEBUG MODE ACTIVE: CLI args detected, using parsed arguments. Effective args: {:?}",
+                args
+            );
+        }
+    }
+
+    // 设置目标采样率 (Define target_sample_rate here)
+    let target_sample_rate: u32 = 16000;
+
     let input_path = Path::new(args.input.as_str());
     // if input_path.extension().unwrap() == "wav" {
     //     warn!("There's an unknown issue that prevent wav file from resampling.\n\
@@ -61,16 +148,32 @@ fn main() -> Result<(), Box<dyn Error>> {
     //     // return Err(Box::from("File extension not supported"));
     // }
 
-    let mut output_samples=do_resample(&multi,target_sample_rate,input_path)?;
-    let active_speeches = do_vad(&multi, target_sample_rate, &args.vad_model, &mut output_samples)?;
-    let subs=do_whisper(&multi, &args.whisper_model, &active_speeches)?;
+    let mut output_samples = do_resample(&multi, target_sample_rate, input_path)?;
+    let active_speeches = do_vad(
+        &multi,
+        target_sample_rate,
+        &args.vad_model,
+        &mut output_samples,
+    )?;
+    let subs = do_whisper(
+        &multi,
+        &args.whisper_model,
+        &active_speeches,
+        &args.language,
+        &args.initial_prompt,
+    )?;
     info!("Saving subs");
     subs.write_to_file(args.output, None).unwrap();
 
     Ok(())
 }
 
-fn do_vad(multi: &MultiProgress, target_sample_rate: u32,model_path:&str, output_samples: &mut Vec<f32>) -> Result<Vec<ActiveSpeech>, Box<dyn Error>> {
+fn do_vad(
+    multi: &MultiProgress,
+    target_sample_rate: u32,
+    model_path: &str,
+    output_samples: &mut Vec<f32>,
+) -> Result<Vec<ActiveSpeech>, Box<dyn Error>> {
     // println!("Output samples bytes: {:?}", output_samples);
     // Load the model
     // let model_path = "models/silero_vad.onnx";
@@ -123,17 +226,27 @@ fn do_vad(multi: &MultiProgress, target_sample_rate: u32,model_path:&str, output
                             let len = full_audio_chunk.len();
                             let duration = len as f32 / sample_rate;
                             if duration > 60.0 {
-                                warn!("Found a {:.2}s chunks at {}s-{}s which is longer than 60.0s.Forced slicing into 2s pieces...",duration,start_time,time);
-                                for (idx, slices) in full_audio_chunk.chunks(16000 * 2).enumerate() {
+                                warn!(
+                                    "Found a {:.2}s chunks at {}s-{}s which is longer than 60.0s.Forced slicing into 2s pieces...",
+                                    duration, start_time, time
+                                );
+                                for (idx, slices) in full_audio_chunk.chunks(16000 * 2).enumerate()
+                                {
                                     let new_start_time = start_time + (idx as f32) * 2.0;
-                                    active_speeches.push(ActiveSpeech::new(new_start_time, new_start_time + (slices.len() as f32) / sample_rate, slices.to_vec()));
+                                    active_speeches.push(ActiveSpeech::new(
+                                        new_start_time,
+                                        new_start_time + (slices.len() as f32) / sample_rate,
+                                        slices.to_vec(),
+                                    ));
                                 }
-                            } else if duration<1.01{
-                                warn!("Found a {:.2}s chunks at {}s-{}s which is shorter than 1.01s.Extending to 1.01s...",duration,start_time,time);
+                            } else if duration < 1.01 {
+                                warn!(
+                                    "Found a {:.2}s chunks at {}s-{}s which is shorter than 1.01s.Extending to 1.01s...",
+                                    duration, start_time, time
+                                );
                                 let padding_length = 16000 - len + 100;
                                 let padding = vec![0.0; padding_length]; // 动态创建一个 Vec
                                 full_audio_chunk.extend_from_slice(&padding); // 使用 extend_from_slice 扩展数据
-
                             } else {
                                 active_speeches.push(ActiveSpeech::new(
                                     start_time,
@@ -196,7 +309,11 @@ fn do_vad(multi: &MultiProgress, target_sample_rate: u32,model_path:&str, output
     Ok(active_speeches)
 }
 
-fn do_resample(multi: &MultiProgress, target_sample_rate: u32, input_path: &Path) -> Result<Vec<f32>, Box<dyn Error>> {
+fn do_resample(
+    multi: &MultiProgress,
+    target_sample_rate: u32,
+    input_path: &Path,
+) -> Result<Vec<f32>, Box<dyn Error>> {
     // 打开输入文件
     let mut ictx = input(input_path).unwrap();
 
@@ -233,7 +350,7 @@ fn do_resample(multi: &MultiProgress, target_sample_rate: u32, input_path: &Path
         ChannelLayout::MONO,
         target_sample_rate,
     )
-        .unwrap();
+    .unwrap();
 
     let mut output_samples: Vec<f32> = Vec::new();
     let packets: Vec<_> = ictx.packets().collect();
@@ -283,7 +400,13 @@ fn do_resample(multi: &MultiProgress, target_sample_rate: u32, input_path: &Path
     Ok(output_samples)
 }
 
-fn do_whisper(multi: &MultiProgress,model_path:&str,active_speech_list: &[ActiveSpeech])->Result<Subtitles, Box<dyn Error>> {
+fn do_whisper(
+    multi: &MultiProgress,
+    model_path: &str,
+    active_speech_list: &[ActiveSpeech],
+    language: &str,
+    initial_prompt_text: &str,
+) -> Result<Subtitles, Box<dyn Error>> {
     // Install a hook to log any errors from the whisper C++ code.
     whisper_rs::install_logging_hooks();
     // Load a context and model.
@@ -294,8 +417,8 @@ fn do_whisper(multi: &MultiProgress,model_path:&str,active_speech_list: &[Active
         model_preset: DtwModelPreset::LargeV3Turbo,
     };
 
-    let ctx = WhisperContext::new_with_params(model_path, context_param)
-        .expect("failed to load model");
+    let ctx =
+        WhisperContext::new_with_params(model_path, context_param).expect("failed to load model");
     // Create a state
     let mut state = ctx.create_state().expect("failed to create key");
 
@@ -309,20 +432,17 @@ fn do_whisper(multi: &MultiProgress,model_path:&str,active_speech_list: &[Active
     // Enable translation.
     params.set_translate(false);
     // Set the language to translate to English.
-    params.set_language(Some("zh"));
+    params.set_language(Some(language));
     // Disable anything that prints to stdout.
     params.set_print_special(false);
     params.set_print_progress(false);
     params.set_print_realtime(false);
     params.set_print_timestamps(false);
     // params.set_no_context(true);
-    let prompt = "请输出简体中文";
-    params.set_initial_prompt(prompt);
-
+    params.set_initial_prompt(initial_prompt_text);
 
     let mut subs = Subtitles::new();
-    let mut num=1;
-
+    let mut num = 1;
 
     // Enable token level timestamps
     params.set_token_timestamps(true);
@@ -342,33 +462,50 @@ fn do_whisper(multi: &MultiProgress,model_path:&str,active_speech_list: &[Active
         // debug!("num_segments: {}", num_segments);
         for i in 0..num_segments {
             // Get the transcribed text and timestamps for the current segment.
-            let segment = state
+            let segment_text_raw = state
                 .full_get_segment_text(i)
-                .expect("failed to get segment")
-                .replace(prompt, "");
+                .expect("failed to get segment");
+
+            let mut processed_text_slice = segment_text_raw.as_str();
+
+            // Check if the segment starts with the initial prompt
+            if !initial_prompt_text.is_empty()
+                && processed_text_slice.starts_with(initial_prompt_text)
+            {
+                // Remove the prompt
+                processed_text_slice = &processed_text_slice[initial_prompt_text.len()..];
+                // Trim leading common separators (like comma, space) that might follow the prompt
+                // You can extend the characters in the closure as needed based on observation
+                processed_text_slice = processed_text_slice
+                    .trim_start_matches(|c: char| c.is_whitespace() || c == '，' || c == ',');
+            }
+
+            let segment = processed_text_slice.to_string();
+
+            // Skip empty segments after processing
+            if segment.is_empty() {
+                continue;
+            }
+
             let start_timestamp = state
                 .full_get_segment_t0(i)
                 .expect("failed to get start timestamp");
             let end_timestamp = state
                 .full_get_segment_t1(i)
                 .expect("failed to get end timestamp");
-            let start_time_ms=start_timestamp*10+((active_speech.start_time*1000.0) as i64);
-            let mut end_time_ms=end_timestamp*10+((active_speech.start_time*1000.0) as i64);
-            if end_time_ms > (active_speech.end_time*1000.0) as i64 {
-                end_time_ms=(active_speech.end_time*1000.0) as i64;
+            let start_time_ms = start_timestamp * 10 + ((active_speech.start_time * 1000.0) as i64);
+            let mut end_time_ms = end_timestamp * 10 + ((active_speech.start_time * 1000.0) as i64);
+            if end_time_ms > (active_speech.end_time * 1000.0) as i64 {
+                end_time_ms = (active_speech.end_time * 1000.0) as i64;
             }
 
-            info!(
-    "[{} - {}]: {}",
-    start_time_ms, end_time_ms,  segment
-);
-            let start_timestamp=Timestamp::from_milliseconds(start_time_ms as u32);
-            let end_timestamp=Timestamp::from_milliseconds(end_time_ms as u32);
-
+            info!("[{} - {}]: {}", start_time_ms, end_time_ms, segment);
+            let start_timestamp = Timestamp::from_milliseconds(start_time_ms as u32);
+            let end_timestamp = Timestamp::from_milliseconds(end_time_ms as u32);
 
             // Add subtitle at the end of the subs' collection.
             subs.push(Subtitle::new(num, start_timestamp, end_timestamp, segment));
-            num+=1;
+            num += 1;
         }
         pb.inc(1);
     }
