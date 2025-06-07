@@ -1707,7 +1707,7 @@ dependencies = [
 
 [[package]]
 name = "whisper_with_vad"
-version = "0.1.1"
+version = "1.0.0"
 dependencies = [
  "clap",
  "console",

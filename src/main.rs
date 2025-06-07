@@ -13,15 +13,28 @@ mod progress;
 mod transcribe;
 mod vad;
 
-use cli::{get_args, get_debug_mode_args};
+use cli::Args;
+use cli::get_args;
+#[cfg(debug_assertions)]
+use cli::get_debug_mode_args;
 
-fn main() -> Result<(), Box<dyn Error>> {
-    let args = if cfg!(debug_assertions) && std::env::args().len() == 1 {
+#[cfg(debug_assertions)]
+fn get_cli_args() -> Args {
+    if std::env::args().len() == 1 {
         println!("Running in debug mode with default arguments.");
         get_debug_mode_args()
     } else {
         get_args()
-    };
+    }
+}
+
+#[cfg(not(debug_assertions))]
+fn get_cli_args() -> Args {
+    get_args()
+}
+
+fn main() -> Result<(), Box<dyn Error>> {
+    let args = get_cli_args();
     let main_start_time = Instant::now();
 
     // Determine base log level based on build profile
@@ -75,9 +88,9 @@ fn main() -> Result<(), Box<dyn Error>> {
         .try_init()
         .expect("Failed to initialize logger");
 
-    info!("Starting transcription for file: {}", args.path.display());
-    info!("Model path: {}", args.model.display());
-    info!("Language: {}", args.language.as_deref().unwrap_or("auto"));
+    info!("Starting transcription for file: {}", args.input.display());
+    info!("Model path: {}", args.whisper_model.display());
+    info!("Language: {}", args.language);
 
     let header_style = ProgressStyle::with_template("{spinner:.green} {prefix:8} {wide_msg}")
         .unwrap()
@@ -87,7 +100,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     pb.set_style(header_style.clone());
     pb.set_prefix(style("[1/3]").bold().dim().to_string());
     pb.set_message(format!("{} Resampling audio...", Emoji("🎧", "»")));
-    let mut samples = audio::do_resample(&multi, 16000, &args.path)?;
+    let mut samples = audio::do_resample(&multi, 16000, &args.input)?;
     pb.finish_with_message(format!(
         "{} Resampling complete.",
         style(Emoji("✔", "✓")).green()
@@ -114,10 +127,10 @@ fn main() -> Result<(), Box<dyn Error>> {
     pb.set_message(format!("{} Transcribing audio...", Emoji("📝", "»")));
     let subs = transcribe::do_whisper(
         &multi,
-        &args.model.to_str().unwrap(),
+        &args.whisper_model.to_str().unwrap(),
         &active_speeches,
-        &args.language.as_deref().unwrap_or(""),
-        &args.initial_prompt.as_deref().unwrap_or(""),
+        &args.language,
+        &args.initial_prompt,
     )?;
     pb.finish_with_message(format!(
         "{} Transcription complete.",
