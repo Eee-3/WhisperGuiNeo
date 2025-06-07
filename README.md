@@ -5,3 +5,4 @@
 1. #### 核心逻辑 Ok
 2. #### cli Ok
 3. #### tui(maybe) / gui
+4. #### CI　CI I need it.
