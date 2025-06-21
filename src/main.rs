@@ -19,22 +19,25 @@ use cli::get_args;
 use cli::get_debug_mode_args;
 
 #[cfg(debug_assertions)]
-fn get_cli_args() -> Args {
+fn get_cli_args() -> Option<Args> {
     if std::env::args().len() == 1 {
         println!("Running in debug mode with default arguments.");
-        get_debug_mode_args()
+        Some(get_debug_mode_args())
     } else {
         get_args()
     }
 }
 
 #[cfg(not(debug_assertions))]
-fn get_cli_args() -> Args {
+fn get_cli_args() -> Option<Args> {
     get_args()
 }
 
 fn main() -> Result<(), Box<dyn Error>> {
-    let args = get_cli_args();
+    let args = match get_cli_args() {
+        Some(args) => args,
+        None => return Ok(()), // about命令已经处理完毕，直接退出
+    };
     let main_start_time = Instant::now();
 
     // Determine base log level based on build profile
