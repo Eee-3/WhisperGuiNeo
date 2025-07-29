@@ -1,12 +1,9 @@
-use clap::builder::Str;
-use console::{style, Emoji};
 use eframe::egui;
 use eframe::egui::{InnerResponse, TextEdit, TextStyle, ViewportBuilder};
 use egui_file_dialog::FileDialog;
 use flexi_logger::{Age, Cleanup, Criterion, Duplicate, FileSpec, Logger, Naming};
-use indicatif::{HumanDuration, MultiProgress, ProgressBar, ProgressStyle};
-use indicatif_log_bridge::LogWrapper;
-use log::{debug, info, LevelFilter};
+#[allow(unused_imports)]
+use log::{debug, error, info, trace, warn, LevelFilter};
 use std::cell::RefCell;
 use std::error::Error;
 use std::path::PathBuf;
