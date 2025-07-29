@@ -1,18 +1,18 @@
-use std::cell::RefCell;
-use console::{Emoji, style};
+use clap::builder::Str;
+use console::{style, Emoji};
 use eframe::egui;
+use eframe::egui::{InnerResponse, TextEdit, TextStyle, ViewportBuilder};
+use egui_file_dialog::FileDialog;
 use flexi_logger::{Age, Cleanup, Criterion, Duplicate, FileSpec, Logger, Naming};
 use indicatif::{HumanDuration, MultiProgress, ProgressBar, ProgressStyle};
 use indicatif_log_bridge::LogWrapper;
-use log::{LevelFilter, info, debug};
+use log::{debug, info, LevelFilter};
+use std::cell::RefCell;
 use std::error::Error;
 use std::path::PathBuf;
 use std::str::FromStr;
 use std::sync::Arc;
 use std::time::Instant;
-use clap::builder::Str;
-use eframe::egui::{InnerResponse, TextEdit, TextStyle, ViewportBuilder};
-use egui_file_dialog::FileDialog;
 
 mod audio;
 mod cli;
@@ -30,18 +30,17 @@ struct App {
 
 #[derive(Default)]
 struct FileSelectionData {
-    hint:String,
-    path:PathBuf,
+    hint: String,
+    path: PathBuf,
     path_string: String,
-    default_filename:String,
-    ongoing:bool,
-
+    default_filename: String,
+    ongoing: bool,
 }
-impl FileSelectionData{
-    fn new(hint:String,default_filename:String)->Self{
-        Self{
+impl FileSelectionData {
+    fn new(hint: String, default_filename: String) -> Self {
+        Self {
             hint,
-            ongoing:false,
+            ongoing: false,
             default_filename,
             ..Self::default()
         }
@@ -55,11 +54,17 @@ impl App {
         // Use the cc.gl (a glow::Context) to create graphics shaders and buffers that you can use
         // for e.g. egui::PaintCallback.
         Self::load_chinese_fonts(cc);
-        Self{
-            file_dialog:RefCell::new(FileDialog::new().as_modal(true)),
-            audio_path:FileSelectionData::new("音频文件".to_string(),"".to_string()),
-            whisper_path:FileSelectionData::new("Whisper模型".to_string(),"ggml-large-v3-turbo.bin".to_string()),
-            silero_vad_path:FileSelectionData::new("SileroVAD模型".to_string(),"silero_vad.onnx".to_string()),
+        Self {
+            file_dialog: RefCell::new(FileDialog::new().as_modal(true)),
+            audio_path: FileSelectionData::new("音频文件".to_string(), "".to_string()),
+            whisper_path: FileSelectionData::new(
+                "Whisper模型".to_string(),
+                "ggml-large-v3-turbo.bin".to_string(),
+            ),
+            silero_vad_path: FileSelectionData::new(
+                "SileroVAD模型".to_string(),
+                "silero_vad.onnx".to_string(),
+            ),
             ..Self::default()
         }
     }
@@ -96,8 +101,6 @@ impl App {
 impl eframe::App for App {
     fn update(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) {
         use egui::text::{LayoutJob, TextFormat};
-        use egui::{Align, Color32, FontId};
-
         self.file_dialog.borrow_mut().update(ctx);
         egui::TopBottomPanel::top("top").show(ctx, |ui| {
             // 使用 vertical_centered，它能完美地居中其内部的每个独立控件。
@@ -137,48 +140,58 @@ impl eframe::App for App {
         });
 
         egui::CentralPanel::default().show(ctx, |ui| {
-            Self::file_selection(ctx, ui, &self.file_dialog,&mut self.audio_path);
-            Self::file_selection(ctx, ui, &self.file_dialog,&mut self.whisper_path);
-            Self::file_selection(ctx, ui, &self.file_dialog,&mut self.silero_vad_path);
-
+            Self::file_selection(ctx, ui, &self.file_dialog, &mut self.audio_path);
+            Self::file_selection(ctx, ui, &self.file_dialog, &mut self.whisper_path);
+            Self::file_selection(ctx, ui, &self.file_dialog, &mut self.silero_vad_path);
 
             // ui.top
         });
     }
-
 }
 impl App {
-    fn file_selection(ctx:&egui::Context, ui: &mut egui::Ui, file_dialog: &RefCell<FileDialog>, file_selection_data:&mut FileSelectionData) -> InnerResponse<()> {
+    fn file_selection(
+        ctx: &egui::Context,
+        ui: &mut egui::Ui,
+        file_dialog: &RefCell<FileDialog>,
+        file_selection_data: &mut FileSelectionData,
+    ) -> InnerResponse<()> {
         ui.horizontal(|ui| {
-            if ui.button("打开".to_string()+ &file_selection_data.hint).clicked(){
-                debug!("开始选择{}文件",file_selection_data.hint);
-                file_selection_data.ongoing=true;
+            if ui
+                .button("打开".to_string() + &file_selection_data.hint)
+                .clicked()
+            {
+                debug!("开始选择{}文件", file_selection_data.hint);
+                file_selection_data.ongoing = true;
 
                 //真服了，用了refcell 结果告诉我 default filename 是 save file mode 用的
                 // file_dialog.replace(file_dialog.take().default_file_name(&file_selection_data.default_filename));
                 file_dialog.borrow_mut().pick_file();
-
             };
             //我真服了，之前匹配放前面pathbuf被“偷”走了
-            if file_selection_data.ongoing &&let Some(path) = file_dialog.borrow_mut().take_picked()  {
+            if file_selection_data.ongoing
+                && let Some(path) = file_dialog.borrow_mut().take_picked()
+            {
                 file_selection_data.path = path.to_path_buf();
-                file_selection_data.path_string= file_selection_data.path.to_string_lossy().into_owned();
-                debug!("打开{}文件",file_selection_data.hint);
-                file_selection_data.ongoing=false;
+                file_selection_data.path_string =
+                    file_selection_data.path.to_string_lossy().into_owned();
+                debug!("打开{}文件", file_selection_data.hint);
+                file_selection_data.ongoing = false;
             } else {
-                if file_selection_data.path_string !=file_selection_data.path.to_string_lossy(){
+                if file_selection_data.path_string != file_selection_data.path.to_string_lossy() {
                     debug!("检测到文件输入框变更: {}", file_selection_data.path_string);
-                    file_selection_data.path=file_selection_data.path_string.clone().try_into().unwrap();
-                    debug!("当前PathBuf内容 {}",file_selection_data.path.to_string_lossy());
-
+                    file_selection_data.path =
+                        file_selection_data.path_string.clone().try_into().unwrap();
+                    debug!(
+                        "当前PathBuf内容 {}",
+                        file_selection_data.path.to_string_lossy()
+                    );
                 }
             }
             ui.centered_and_justified(|ui| {
-                let file_text_edit =TextEdit::singleline(&mut file_selection_data.path_string).hint_text("请选择".to_string()+&file_selection_data.hint);
+                let file_text_edit = TextEdit::singleline(&mut file_selection_data.path_string)
+                    .hint_text("请选择".to_string() + &file_selection_data.hint);
                 ui.add(file_text_edit)
             });
-
-
         })
     }
 }
@@ -230,8 +243,8 @@ fn main() -> Result<(), Box<dyn Error>> {
             Cleanup::KeepLogFiles(7),
         )
         .start()?;
-    let native_options = eframe::NativeOptions{
-        viewport:ViewportBuilder::default().with_min_inner_size([565.0,480.0]),
+    let native_options = eframe::NativeOptions {
+        viewport: ViewportBuilder::default().with_min_inner_size([565.0, 480.0]),
         ..Default::default()
     };
     eframe::run_native(
