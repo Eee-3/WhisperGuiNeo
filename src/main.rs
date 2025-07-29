@@ -9,7 +9,7 @@ use std::error::Error;
 use std::path::PathBuf;
 use std::str::FromStr;
 use std::sync::Arc;
-use std::time::Instant;
+// use std::time::Instant;
 
 mod audio;
 mod cli;
@@ -30,15 +30,15 @@ struct FileSelectionData {
     hint: String,
     path: PathBuf,
     path_string: String,
-    default_filename: String,
+    // default_filename: String,
     ongoing: bool,
 }
 impl FileSelectionData {
-    fn new(hint: String, default_filename: String) -> Self {
+    fn new(hint: String) -> Self {
         Self {
             hint,
             ongoing: false,
-            default_filename,
+            // default_filename,
             ..Self::default()
         }
     }
@@ -53,14 +53,12 @@ impl App {
         Self::load_chinese_fonts(cc);
         Self {
             file_dialog: RefCell::new(FileDialog::new().as_modal(true)),
-            audio_path: FileSelectionData::new("音频文件".to_string(), "".to_string()),
+            audio_path: FileSelectionData::new("音频文件".to_string()),
             whisper_path: FileSelectionData::new(
                 "Whisper模型".to_string(),
-                "ggml-large-v3-turbo.bin".to_string(),
             ),
             silero_vad_path: FileSelectionData::new(
                 "SileroVAD模型".to_string(),
-                "silero_vad.onnx".to_string(),
             ),
             ..Self::default()
         }
@@ -96,7 +94,7 @@ impl App {
 }
 
 impl eframe::App for App {
-    fn update(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) {
+    fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         use egui::text::{LayoutJob, TextFormat};
         self.file_dialog.borrow_mut().update(ctx);
         egui::TopBottomPanel::top("top").show(ctx, |ui| {
@@ -137,9 +135,9 @@ impl eframe::App for App {
         });
 
         egui::CentralPanel::default().show(ctx, |ui| {
-            Self::file_selection(ctx, ui, &self.file_dialog, &mut self.audio_path);
-            Self::file_selection(ctx, ui, &self.file_dialog, &mut self.whisper_path);
-            Self::file_selection(ctx, ui, &self.file_dialog, &mut self.silero_vad_path);
+            Self::file_selection(ui, &self.file_dialog, &mut self.audio_path);
+            Self::file_selection(ui, &self.file_dialog, &mut self.whisper_path);
+            Self::file_selection(ui, &self.file_dialog, &mut self.silero_vad_path);
 
             // ui.top
         });
@@ -147,7 +145,6 @@ impl eframe::App for App {
 }
 impl App {
     fn file_selection(
-        ctx: &egui::Context,
         ui: &mut egui::Ui,
         file_dialog: &RefCell<FileDialog>,
         file_selection_data: &mut FileSelectionData,
@@ -193,7 +190,7 @@ impl App {
     }
 }
 fn main() -> Result<(), Box<dyn Error>> {
-    let main_start_time = Instant::now();
+    // let main_start_time = Instant::now();
 
     // Determine base log level based on build profile
     let base_log_level = if cfg!(debug_assertions) {
