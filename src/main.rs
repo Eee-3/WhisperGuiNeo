@@ -1,19 +1,18 @@
 use eframe::egui;
-use eframe::egui::{InnerResponse, TextEdit, TextStyle, ViewportBuilder};
+use eframe::egui::{Button, Id, InnerResponse, Modal, ProgressBar, RichText, TextEdit, TextStyle, ViewportBuilder};
 use egui_file_dialog::FileDialog;
 use flexi_logger::{Age, Cleanup, Criterion, Duplicate, FileSpec, Logger, Naming};
 #[allow(unused_imports)]
-use log::{debug, error, info, trace, warn, LevelFilter};
+use log::{LevelFilter, debug, error, info, trace, warn};
 use std::cell::RefCell;
+use std::cmp::PartialEq;
 use std::error::Error;
 use std::path::PathBuf;
 use std::str::FromStr;
-use std::sync::Arc;
-// use std::time::Instant;
+use std::sync::{Arc, Mutex};
+use std::thread;
 
 mod audio;
-mod cli;
-mod progress;
 mod transcribe;
 mod vad;
 
@@ -23,6 +22,25 @@ struct App {
     audio_path: FileSelectionData,
     whisper_path: FileSelectionData,
     silero_vad_path: FileSelectionData,
+    output_path: FileOutputData,
+    language: String,
+    initial_prompt: String,
+    state: Arc<Mutex<AppState>>,
+    progress:Arc<Mutex<f32>>,
+}
+#[derive(PartialOrd, PartialEq)]
+enum AppState{
+    Idle,
+    Resample,
+    VAD,
+    Whisper,
+    Saving,
+    Finished
+}
+impl Default for AppState {
+    fn default() -> Self {
+        Self::Idle
+    }
 }
 
 #[derive(Default)]
@@ -43,6 +61,24 @@ impl FileSelectionData {
         }
     }
 }
+#[derive(Default)]
+struct FileOutputData {
+    hint: String,
+    path: PathBuf,
+    path_string: String,
+    default_filename: String,
+    ongoing: bool,
+}
+impl FileOutputData {
+    fn new(hint: String, default_filename: String) -> Self {
+        Self {
+            hint,
+            ongoing: false,
+            default_filename,
+            ..Self::default()
+        }
+    }
+}
 
 impl App {
     fn new(cc: &eframe::CreationContext<'_>) -> Self {
@@ -52,14 +88,12 @@ impl App {
         // for e.g. egui::PaintCallback.
         Self::load_chinese_fonts(cc);
         Self {
-            file_dialog: RefCell::new(FileDialog::new().as_modal(true)),
+            file_dialog: RefCell::new(FileDialog::new().as_modal(true).default_size([664.,200.])),
             audio_path: FileSelectionData::new("音频文件".to_string()),
-            whisper_path: FileSelectionData::new(
-                "Whisper模型".to_string(),
-            ),
-            silero_vad_path: FileSelectionData::new(
-                "SileroVAD模型".to_string(),
-            ),
+            whisper_path: FileSelectionData::new("Whisper模型(ggml-*.bin)".to_string()),
+            silero_vad_path: FileSelectionData::new("SileroVAD模型(silero_vad.onnx)".to_string()),
+            output_path: FileOutputData::new("输出文件".to_string(), String::new()),
+            language:"zh".to_string(),
             ..Self::default()
         }
     }
@@ -93,9 +127,11 @@ impl App {
     }
 }
 
+
 impl eframe::App for App {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         use egui::text::{LayoutJob, TextFormat};
+        catppuccin_egui::set_theme(ctx, catppuccin_egui::MACCHIATO);
         self.file_dialog.borrow_mut().update(ctx);
         egui::TopBottomPanel::top("top").show(ctx, |ui| {
             // 使用 vertical_centered，它能完美地居中其内部的每个独立控件。
@@ -138,9 +174,170 @@ impl eframe::App for App {
             Self::file_selection(ui, &self.file_dialog, &mut self.audio_path);
             Self::file_selection(ui, &self.file_dialog, &mut self.whisper_path);
             Self::file_selection(ui, &self.file_dialog, &mut self.silero_vad_path);
+            ui.separator();
+            ui.horizontal(|ui| {
+                ui.centered_and_justified(|ui| {
+                    ui.horizontal(|ui| {
+                        ui.label("语言");
+                        // ui.centered_and_justified(|ui| {
+                        ui.text_edit_singleline(&mut self.language);
+                        // })
+                    })
+                });
+                ui.centered_and_justified(|ui| {
+                    ui.horizontal(|ui| {
+                        ui.label("Initial Prompt (Optional)");
+                        // ui.centered_and_justified(|ui| {
+                        ui.text_edit_singleline(&mut self.initial_prompt);
+                        // })
+                    })
+                });
+            });
+            ui.separator();
+            ui.horizontal(|ui| {
+                if ui.button("输出文件").clicked() {
+                    debug!("开始选择输出文件");
+                    self.output_path.default_filename = self
+                        .audio_path
+                        .path
+                        .file_stem()
+                        .unwrap()
+                        .to_string_lossy()
+                        .into_owned();
+                    self.output_path.ongoing = true;
+
+                    //真服了，用了refcell 结果告诉我 default filename 是 save file mode 用的
+                    self.file_dialog.replace(
+                        self.file_dialog
+                            .take()
+                            .title("打开输出文件")
+                            .default_file_name(&self.output_path.default_filename)
+                            .add_save_extension("SubRip Subtitle", "srt")
+                            .default_save_extension("SubRip Subtitle"),
+                    );
+                    self.file_dialog.borrow_mut().save_file();
+                };
+                if self.output_path.ongoing
+                    && let Some(path) = self.file_dialog.borrow_mut().take_picked()
+                {
+                    self.output_path.path = path.to_path_buf();
+                    self.output_path.path_string =
+                        self.output_path.path.to_string_lossy().into_owned();
+                    debug!("保存到{}文件", self.output_path.hint);
+                    self.output_path.ongoing = false;
+                } else {
+                    if self.output_path.path_string != self.output_path.path.to_string_lossy() {
+                        debug!("检测到文件输入框变更: {}", self.output_path.path_string);
+                        self.output_path.path =
+                            self.output_path.path_string.clone().try_into().unwrap();
+                        debug!(
+                            "当前PathBuf内容 {}",
+                            self.output_path.path.to_string_lossy()
+                        );
+                    }
+                }
+                ui.centered_and_justified(|ui| {
+                    let file_text_edit = TextEdit::singleline(&mut self.output_path.path_string)
+                        .hint_text("请选择".to_string() + &self.output_path.hint);
+                    ui.add(file_text_edit)
+                });
+            });
+            ui.separator();
+            let should_start = if self.audio_path.path.is_file()
+                && self.whisper_path.path.is_file()
+                && self.silero_vad_path.path.is_file()
+                && !self.output_path.path_string.is_empty()
+                && !self.language.is_empty()
+                && *self.state.lock().unwrap() == AppState::Idle
+            {
+                true
+            } else {
+                false
+            };
+            ui.horizontal(|ui| {
+               if ui.add_enabled(
+                    should_start,
+                    Button::new(RichText::new("开始转录").size(14.0).strong())
+                        .corner_radius(5.0)
+                        .min_size([710.0, 32.8].into()),
+                ).clicked(){
+                   debug!("开始转录");
+                   thread::spawn({
+                        let state = Arc::clone(&self.state);
+                        let progress = Arc::clone(&self.progress);
+                       let audio_path = self.audio_path.path.clone();
+                       let vad_path=self.silero_vad_path.path_string.clone();
+                       let whisper_path=self.whisper_path.path_string.clone();
+                       let language=self.language.clone();
+                       let initial_prompt=self.initial_prompt.clone();
+                       let output_path=self.output_path.path.clone();
+                        move || {
+                            {*progress.lock().unwrap() =  0.;}
+                            {*state.lock().unwrap() = AppState::Resample;}
+
+                            let mut resampled =audio::do_resample(progress.clone(), 16000, &audio_path).unwrap();
+                            {*progress.lock().unwrap() =  1.;}
+
+                            {*progress.lock().unwrap() =  0.;}
+                            {*state.lock().unwrap() = AppState::VAD;}
+
+                            let active=vad::do_vad(progress.clone(), 16000, &vad_path, &mut resampled).unwrap();
+                            {*progress.lock().unwrap() =  1.;}
+
+                            {*progress.lock().unwrap() =  0.;}
+                            {*state.lock().unwrap() = AppState::Whisper;}
+
+                            let subs=transcribe::do_whisper(progress.clone(), &whisper_path, &active, &language, &initial_prompt).unwrap();
+                            {*progress.lock().unwrap() =  1.;}
+
+                            {*progress.lock().unwrap() =  0.;}
+                            {*state.lock().unwrap() = AppState::Saving;}
+
+                            subs.write_to_file(&output_path, None).unwrap();
+                            {*progress.lock().unwrap() =  1.;}
+
+                            {*progress.lock().unwrap() =  0.;}
+                            {*state.lock().unwrap() = AppState::Finished;}
+                        }
+                    });
+               };
+            });
+            ui.separator();
+                ui.label(
+                    match *self.state.lock().unwrap() {
+                        AppState::Idle => "空闲".to_string(),
+                        AppState::VAD => "正在检测语音活动...".to_string(),
+                        AppState::Whisper => "正在转录...".to_string(),
+                        AppState::Resample=>"正在重采样".to_string(),
+                        AppState::Saving=>"正在保存".to_string(),
+                        AppState::Finished=>"完成".to_string(),
+                    }
+                );
+            // ui.label("Label");
+            ui.add(ProgressBar::new(*self.progress.lock().unwrap()).show_percentage())
+
+
 
             // ui.top
         });
+        if *self.state.lock().unwrap()==AppState::Finished{
+            let modal = Modal::new(Id::from("my_modal"));
+
+            // What goes inside the modal
+            modal.show(ctx,|ui| {
+                ui.heading("转录已完成");
+                ui.separator();
+                ui.strong("文件已保存到".to_string()+ &self.output_path.path_string);
+                ui.separator();
+                ui.vertical_centered_justified(|ui| {
+                    if ui.button("OK").clicked(){
+                        *self.state.lock().unwrap()=AppState::Idle;
+                    };
+                });
+
+
+            });
+        }
     }
 }
 impl App {
@@ -158,7 +355,7 @@ impl App {
                 file_selection_data.ongoing = true;
 
                 //真服了，用了refcell 结果告诉我 default filename 是 save file mode 用的
-                // file_dialog.replace(file_dialog.take().default_file_name(&file_selection_data.default_filename));
+                file_dialog.replace(file_dialog.take().title(&("打开".to_string() + &file_selection_data.hint)));
                 file_dialog.borrow_mut().pick_file();
             };
             //我真服了，之前匹配放前面pathbuf被“偷”走了
@@ -238,7 +435,9 @@ fn main() -> Result<(), Box<dyn Error>> {
         )
         .start()?;
     let native_options = eframe::NativeOptions {
-        viewport: ViewportBuilder::default().with_min_inner_size([565.0, 480.0]),
+        viewport: ViewportBuilder::default()
+            .with_inner_size([725.6, 292.])
+            .with_resizable(false),
         ..Default::default()
     };
     eframe::run_native(

@@ -1,9 +1,8 @@
 use std::error::Error;
+use std::sync::{Arc, Mutex};
 use log::{error, warn};
-use indicatif::{MultiProgress, ProgressBar};
 use vad_rs::{Vad, VadStatus};
 
-use crate::progress::{get_active_style, get_finished_style};
 
 #[derive(Debug, Clone)]
 pub struct ActiveSpeech {
@@ -23,7 +22,7 @@ impl ActiveSpeech {
 }
 
 pub fn do_vad(
-    multi: &MultiProgress,
+    progress: Arc<Mutex<f32>>,
     target_sample_rate: u32,
     model_path: &str,
     output_samples: &mut Vec<f32>,
@@ -42,14 +41,14 @@ pub fn do_vad(
     output_samples.extend(vec![0.0; sample_rate as usize]);
     let chunks: Vec<_> = output_samples.chunks(chunk_size).enumerate().collect();
     let mut active_speeches: Vec<ActiveSpeech> = Vec::new();
+    let total = chunks.len();
 
-    let pb = multi.add(ProgressBar::new(chunks.len() as u64));
-    pb.set_style(get_active_style());
-    pb.set_message("Detecting Speech...");
 
-    for (i, chunk) in chunks {
-        pb.inc(1);
-        let time = i as f32 * chunk_size as f32 / sample_rate;
+
+    for (i, chunk) in chunks.iter() {
+        {        *progress.lock().unwrap() = *i as f32 / total as f32;}
+
+        let time = *i as f32 * chunk_size as f32 / sample_rate;
 
         match vad.compute(chunk) {
             Ok(result) => {
@@ -125,7 +124,7 @@ pub fn do_vad(
                     .code()
                 {
                     warn!(
-                        "Got an InvalidArgument error fro ort.This might be a normal behavior at the end of the audio."
+                        "Got an InvalidArgument error from ort.This might be a normal behavior at the end of the audio."
                     );
                     is_speech = true;
                 } else {
@@ -134,9 +133,6 @@ pub fn do_vad(
             }
         }
     }
-    pb.set_style(get_finished_style());
-    pb.finish();
-    multi.remove(&pb);
 
     Ok(active_speeches)
 }
