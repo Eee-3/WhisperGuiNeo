@@ -1,3 +1,4 @@
+#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 use eframe::egui;
 use eframe::egui::{Button, Id, InnerResponse, Modal, ProgressBar, RichText, TextEdit, TextStyle, ViewportBuilder};
 use egui_file_dialog::FileDialog;
