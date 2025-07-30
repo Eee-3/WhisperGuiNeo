@@ -2,15 +2,13 @@ use ffmpeg_next::{
     channel_layout::ChannelLayout, codec::Context, format::Sample, format::input,
     format::sample::Type::Planar, software, util::frame::audio::Audio,
 };
-use indicatif::{MultiProgress, ProgressBar};
 use log::{debug, info};
 use std::error::Error;
 use std::path::Path;
-
-use crate::progress::{get_active_style, get_finished_style};
+use std::sync::{Arc, Mutex};
 
 pub fn do_resample(
-    multi: &MultiProgress,
+    progress: Arc<Mutex<f32>>,
     target_sample_rate: u32,
     input_path: &Path,
 ) -> Result<Vec<f32>, Box<dyn Error>> {
@@ -54,18 +52,15 @@ pub fn do_resample(
 
     let mut output_samples: Vec<f32> = Vec::new();
     let packets: Vec<_> = ictx.packets().collect();
-    let pb = multi.add(ProgressBar::new(packets.len() as u64));
-    pb.set_style(get_active_style());
-    pb.set_message("Resampling Audio...");
-
+    let total=packets.len();
     // 读取并处理每一帧
-    for (stream, packet) in packets {
-        pb.inc(1);
+    for (idx,(stream, packet)) in packets.iter().enumerate() {
+        {        *progress.lock().unwrap() = idx as f32 / total as f32;}
         if stream.index() != audio_stream_index {
             continue;
         }
 
-        decoder.send_packet(&packet).unwrap();
+        decoder.send_packet(packet).unwrap();
 
         let mut decoded: Audio = Audio::empty();
         while decoder.receive_frame(&mut decoded).is_ok() {
@@ -78,9 +73,6 @@ pub fn do_resample(
             }
         }
     }
-    pb.set_style(get_finished_style());
-    pb.finish();
-    multi.remove(&pb);
 
     debug!("Output samples count: {}", output_samples.len());
     Ok(output_samples)

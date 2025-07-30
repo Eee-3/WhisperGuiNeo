@@ -1,16 +1,15 @@
-use indicatif::{MultiProgress, ProgressBar};
 use log::info;
 use srtlib::{Subtitle, Subtitles, Timestamp};
 use std::error::Error;
+use std::sync::{Arc, Mutex};
 use whisper_rs::{
     DtwModelPreset, FullParams, SamplingStrategy, WhisperContext, WhisperContextParameters,
 };
 
-use crate::progress::{get_active_style, get_finished_style};
 use crate::vad::ActiveSpeech;
 
 pub fn do_whisper(
-    multi: &MultiProgress,
+    progress:Arc<Mutex<f32>>,
     model_path: &str,
     active_speech_list: &[ActiveSpeech],
     language: &str,
@@ -55,12 +54,10 @@ pub fn do_whisper(
 
     // Enable token level timestamps
     params.set_token_timestamps(true);
-    let pb = multi.add(ProgressBar::new(active_speech_list.len() as u64));
-    pb.set_style(get_active_style());
-    pb.set_message("Transcribing Speech...");
+    let total = active_speech_list.len();
 
     let st = std::time::Instant::now();
-    for active_speech in active_speech_list.iter() {
+    for (idx,active_speech) in active_speech_list.iter().enumerate() {
         let s = active_speech.data.to_vec();
         // s.extend(vec![0.0; 16000usize]);
         state.full(params.clone(), &s).expect("failed to run model");
@@ -118,12 +115,9 @@ pub fn do_whisper(
             subs.push(Subtitle::new(num, start_timestamp, end_timestamp, segment));
             num += 1;
         }
-        pb.inc(1);
+        *progress.lock().unwrap() = idx as f32 / total as f32;
     }
     let et = std::time::Instant::now();
     info!("took {}ms", (et - st).as_millis());
-    pb.set_style(get_finished_style());
-    pb.finish();
-    multi.remove(&pb);
     Ok(subs)
 }

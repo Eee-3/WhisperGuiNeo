@@ -5,17 +5,16 @@ edition = "2024"
 
 [dependencies]
 ffmpeg-next ={ version = "7.1.0",features = ["default","software-resampling"]}
-flexi_logger = { version = "0.28.0", features = ["specfile", "compress", "async"] }
+flexi_logger = { version = "0.31.2", features = ["specfile", "compress", "async"] }
 vad-rs = { version = "0.1.5" ,features = ["default","directml"]}
 log = "0.4.27"
-indicatif = "0.17.11"
-indicatif-log-bridge = "0.2.3"
 ort = {version = "2.0.0-rc.9"}
 ort-sys = { version = "=2.0.0-rc.9", default-features = false } # match whatever version of `ort` you use
 whisper-rs = { version = "0.14.2" ,features = ["default","log_backend","vulkan"]}
 #hound = "3.5.1"
 srtlib = "0.2.0"
-clap = { version = "4.5.39", features = ["derive"] }
 console = "0.15.11"
-
+eframe={version = "0.32.0"}
+egui-file-dialog = "0.11.0"
+catppuccin-egui = { version = "5.6.0" ,default-features = false,features = ["egui32"]}
 
