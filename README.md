@@ -1,4 +1,4 @@
-# whisper_with_vad
+# WhisperGuiNeo
 ### 一个使用vad进行检测后 再投入 whisper 的项目
 ### v2.0.0已发布
 ### 现在有GUI了
